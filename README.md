@@ -181,5 +181,4 @@ A: Tidak. Open-Meteo sepenuhnya gratis untuk penggunaan non-komersial dan tidak 
 
 **Q: Bagaimana jika Gemini API saya terkena batasan gratis (quota limit)?**
 A: Bot secara otomatis mendeteksi kegagalan tersebut dan mengaktifkan sirkuit pengaman (*circuit breaker*), lalu beralih (*failover*) ke provider aktif berikutnya seperti OpenRouter atau Groq yang telah Anda konfigurasi di `.env`.
-#   d i s c o r d - a i c h a t b o t  
- 
+#
