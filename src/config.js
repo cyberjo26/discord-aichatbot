@@ -21,8 +21,8 @@ function envList(name, fallback = []) {
   return value.split(',').map((item) => item.trim()).filter(Boolean);
 }
 
-const configuredProviderOrder = envList('AI_PROVIDER_ORDER', ['openrouter', 'gemini', 'groq', 'cerebras', 'pollinations'])
-  .filter((name) => name === 'openrouter' || name === 'gemini' || name === 'groq' || name === 'cerebras' || name === 'pollinations');
+const configuredProviderOrder = envList('AI_PROVIDER_ORDER', ['openrouter', 'gemini', 'groq', 'cerebras', 'pollinations', 'puter'])
+  .filter((name) => name === 'openrouter' || name === 'gemini' || name === 'groq' || name === 'cerebras' || name === 'pollinations' || name === 'puter');
 
 const config = {
   // Discord
@@ -65,10 +65,15 @@ const config = {
   pollinationsApiKey: process.env.POLLINATIONS_API_KEY || null,
   pollinationsUrl: 'https://text.pollinations.ai/openai',
 
+  // Puter API
+  puterApiKey: process.env.PUTER_API_KEY || null,
+  puterUrl: 'https://api.puter.com/puterai/openai/v1/chat/completions',
+  puterModel: process.env.PUTER_MODEL || 'claude-3-5-sonnet',
+
   // Cross-provider routing and circuit breaker
   aiProviderOrder: configuredProviderOrder.length > 0
     ? configuredProviderOrder
-    : ['openrouter', 'gemini', 'groq', 'cerebras', 'pollinations'],
+    : ['openrouter', 'gemini', 'groq', 'cerebras', 'pollinations', 'puter'],
   aiRequestTimeoutMs: Number(process.env.AI_REQUEST_TIMEOUT_MS) || 12000,
   aiCircuitFailureThreshold: 2,
   aiCircuitCooldownMs: 30_000,

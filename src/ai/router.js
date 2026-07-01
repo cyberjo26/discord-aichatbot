@@ -5,6 +5,7 @@ import { isGeminiEnabled, geminiCompletion } from './providers/gemini.js';
 import { isGroqEnabled, groqCompletion } from './providers/groq.js';
 import { isCerebrasEnabled, cerebrasCompletion } from './providers/cerebras.js';
 import { isPollinationsEnabled, pollinationsCompletion } from './providers/pollinations.js';
+import { isPuterEnabled, puterCompletion } from './providers/puter.js';
 
 const providers = {
   openrouter: { enabled: isOpenRouterEnabled, complete: openRouterCompletion },
@@ -12,6 +13,7 @@ const providers = {
   groq: { enabled: isGroqEnabled, complete: groqCompletion },
   cerebras: { enabled: isCerebrasEnabled, complete: cerebrasCompletion },
   pollinations: { enabled: isPollinationsEnabled, complete: pollinationsCompletion },
+  puter: { enabled: isPuterEnabled, complete: puterCompletion },
 };
 
 const health = new Map(Object.keys(providers).map((name) => [name, {

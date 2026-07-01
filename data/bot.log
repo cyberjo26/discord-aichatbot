@@ -60,3 +60,32 @@
 [2026-07-01 14.04.22] [INFO]    Commands: 8 (slash) + prefix (!) + @mention
 [2026-07-01 14.04.22] [INFO] ⏰ Loaded 1 voice/text reminders from SQLite storage
 [2026-07-01 14.04.22] [INFO] 📦 Backup completed for 2 data files
+[2026-07-01 14.05.55] [INFO] ⚙️ Server settings loaded (0 guilds)
+[2026-07-01 14.05.57] [OK] 🤖 AI Bot is online! [JARVIS MODE]
+[2026-07-01 14.05.57] [INFO]    Logged in as: Chisato#9696
+[2026-07-01 14.05.57] [INFO]    Servers: 3
+[2026-07-01 14.05.57] [INFO]    Commands: 8 (slash) + prefix (!) + @mention
+[2026-07-01 14.05.57] [INFO] ⏰ Loaded 1 voice/text reminders from SQLite storage
+[2026-07-01 14.05.57] [INFO] 📦 Backup completed for 2 data files
+[2026-07-01 14.06.12] [INFO] ⚙️ Server settings loaded (0 guilds)
+[2026-07-01 14.06.14] [OK] 🤖 AI Bot is online! [JARVIS MODE]
+[2026-07-01 14.06.14] [INFO]    Logged in as: Chisato#9696
+[2026-07-01 14.06.14] [INFO]    Servers: 3
+[2026-07-01 14.06.14] [INFO]    Commands: 8 (slash) + prefix (!) + @mention
+[2026-07-01 14.06.14] [INFO] ⏰ Loaded 1 voice/text reminders from SQLite storage
+[2026-07-01 14.06.14] [INFO] 📦 Backup completed for 2 data files
+[2026-07-01 14.06.20] [INFO] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-07-01 14.06.20] [INFO] 📩 Pesan dari cyberjo26: "halo"
+[2026-07-01 14.06.20] [INFO] [Step 1] 🧠 Reasoning — menganalisis pesan...
+[2026-07-01 14.06.20] [INFO] [Step 1] ✅ Selesai dalam 0.0s → Action: chat | Thought: local fast path
+[2026-07-01 14.06.20] [INFO] [Step 2] 💬 Generating response (chat)...
+[2026-07-01 14.06.23] [INFO] AI OK: provider=pollinations model=gpt-oss-20b task=completion latency=2817ms
+[2026-07-01 14.06.23] [INFO] [Step 2] ✅ Response generated dalam 2.8s
+[2026-07-01 14.06.24] [OK] ✅ DONE — Total waktu: 3.4s (reason: 0.0s + response: 2.8s)
+[2026-07-01 14.06.24] [INFO] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-07-01 14.06.40] [INFO] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[2026-07-01 14.06.40] [INFO] 📩 Pesan dari cyberjo26: "apa kabarmu hari ini?"
+[2026-07-01 14.06.40] [INFO] [Step 1] 🧠 Reasoning — menganalisis pesan...
+[2026-07-01 14.06.40] [INFO] [Step 1] ✅ Selesai dalam 0.0s → Action: knowledge | Thought: local fast path
+[2026-07-01 14.06.40] [INFO] [Step 2] 💬 Generating response (knowledge)...
+[2026-07-01 14.06.43] [INFO] AI OK: provider=pollinations model=gpt-oss-20b task=completion latency=3028ms
