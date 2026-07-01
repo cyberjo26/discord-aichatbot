@@ -62,6 +62,7 @@ const config = {
   cerebrasModel: process.env.CEREBRAS_MODEL || 'Qwen/Qwen3-32B',
 
   // Pollinations API
+  pollinationsApiKey: process.env.POLLINATIONS_API_KEY || null,
   pollinationsUrl: 'https://text.pollinations.ai/openai',
 
   // Cross-provider routing and circuit breaker

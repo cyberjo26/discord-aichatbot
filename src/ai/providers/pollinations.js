@@ -35,11 +35,16 @@ export async function pollinationsCompletion(messages, opts = {}) {
       temperature: opts.temperature ?? 0.7,
     };
 
+    const headers = {
+      'Content-Type': 'application/json',
+    };
+    if (config.pollinationsApiKey) {
+      headers['Authorization'] = `Bearer ${config.pollinationsApiKey}`;
+    }
+
     const res = await fetch(config.pollinationsUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify(body),
       signal: controller.signal,
     });
