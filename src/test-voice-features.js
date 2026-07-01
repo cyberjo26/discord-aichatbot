@@ -70,17 +70,26 @@ async function runTests() {
     assert.strictEqual(sanitizeDisplayName(""), "User");
     logger("✅ Test 1 Passed!");
 
-    // ─── Test 2: Absolute Time Parser ────────────────────────────────────
+    // ─── Test 2: Absolute Time Parser (Indonesian) ────────────────────────────────────
     logger("Test 2: Absolute Time Parser (Indonesian)");
-    const parsed1 = parseAbsoluteTime("jam 3 sore");
-    assert.ok(parsed1 > Date.now());
+    // Mock Date.now() to a fixed time (e.g. 10:00 AM today)
+    const realDateNow = Date.now;
+    const fixedNow = new Date('2024-01-01T10:00:00Z').getTime();
+    Date.now = () => fixedNow;
     
-    const parsed2 = parseAbsoluteTime("besok jam 7 pagi");
-    assert.ok(parsed2 > Date.now() + 12 * 60 * 60 * 1000);
-    
-    const parsedPast = parseAbsoluteTime("jam 1 pagi");
-    assert.ok(parsedPast > Date.now()); // Must adjust to tomorrow if passed
-    logger("✅ Test 2 Passed!");
+    try {
+      const parsed1 = parseAbsoluteTime("jam 3 sore");
+      assert.ok(parsed1 > fixedNow);
+      
+      const parsed2 = parseAbsoluteTime("besok jam 7 pagi");
+      assert.ok(parsed2 > fixedNow + 12 * 60 * 60 * 1000);
+      
+      const parsedPast = parseAbsoluteTime("jam 1 pagi");
+      assert.ok(parsedPast > fixedNow); // Must adjust to tomorrow if passed
+      logger("✅ Test 2 Passed!");
+    } finally {
+      Date.now = realDateNow; // Restore
+    }
 
     // ─── Test 3: Sanitize Reminder Text ──────────────────────────────────
     logger("Test 3: Sanitize Reminder Text");

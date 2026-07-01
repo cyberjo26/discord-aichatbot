@@ -110,7 +110,7 @@ export function parseAbsoluteTime(text, timezone = 'Asia/Bangkok') {
     else if (hour === 12) hour = 0; // Next day handles midnight wrapping below
   }
 
-  const now = new Date();
+  const now = new Date(Date.now());
   
   // Calculate Target Time natively in NodeJS by parsing formatted string in the target timezone
   const dtfDate = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' });

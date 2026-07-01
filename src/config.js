@@ -21,8 +21,8 @@ function envList(name, fallback = []) {
   return value.split(',').map((item) => item.trim()).filter(Boolean);
 }
 
-const configuredProviderOrder = envList('AI_PROVIDER_ORDER', ['openrouter', 'gemini', 'groq', 'cerebras'])
-  .filter((name) => name === 'openrouter' || name === 'gemini' || name === 'groq' || name === 'cerebras');
+const configuredProviderOrder = envList('AI_PROVIDER_ORDER', ['openrouter', 'gemini', 'groq', 'cerebras', 'pollinations'])
+  .filter((name) => name === 'openrouter' || name === 'gemini' || name === 'groq' || name === 'cerebras' || name === 'pollinations');
 
 const config = {
   // Discord
@@ -61,10 +61,13 @@ const config = {
   cerebrasUrl: 'https://api.cerebras.ai/v1/chat/completions',
   cerebrasModel: process.env.CEREBRAS_MODEL || 'Qwen/Qwen3-32B',
 
+  // Pollinations API
+  pollinationsUrl: 'https://text.pollinations.ai/openai',
+
   // Cross-provider routing and circuit breaker
   aiProviderOrder: configuredProviderOrder.length > 0
     ? configuredProviderOrder
-    : ['openrouter', 'gemini', 'groq', 'cerebras'],
+    : ['openrouter', 'gemini', 'groq', 'cerebras', 'pollinations'],
   aiRequestTimeoutMs: Number(process.env.AI_REQUEST_TIMEOUT_MS) || 12000,
   aiCircuitFailureThreshold: 2,
   aiCircuitCooldownMs: 30_000,

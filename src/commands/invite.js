@@ -6,12 +6,12 @@ export const data = new SlashCommandBuilder()
 
 export async function execute(interaction) {
   const clientId = interaction.client.user.id;
-  const inviteUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&permissions=8&scope=bot%20applications.commands`;
+  const inviteUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&permissions=3230720&scope=bot%20applications.commands`;
 
   const embed = new EmbedBuilder()
     .setColor('#5865F2')
     .setTitle('🤖 Undang Bot Ini Ke Server Kamu!')
-    .setDescription('Klik tombol di bawah ini untuk mengundang bot ini ke server lain dengan hak akses Administrator dan Slash Commands.');
+    .setDescription('Klik tombol di bawah ini untuk mengundang bot ini ke server lain dengan hak akses standar.');
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()

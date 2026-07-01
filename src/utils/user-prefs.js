@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import config from '../config.js';
 import logger from './logger.js';
+import { safeWriteJson } from './file-utils.js';
 
 /**
  * User Preferences — Self-Improving Response System
@@ -55,7 +56,7 @@ function scheduleSave() {
       }
 
       const data = Object.fromEntries(prefsStore);
-      fs.writeFileSync(config.userPrefsFile, JSON.stringify(data, null, 2));
+      safeWriteJson(config.userPrefsFile, data);
       logger.debug('User prefs saved to disk');
     } catch (err) {
       logger.error(`Failed to save user prefs: ${err.message}`);
@@ -156,4 +157,14 @@ export function setUserPref(userId, key, value) {
   return false;
 }
 
-export default { initPrefs, getUserPrefs, trackInteraction, buildStyleInstruction, setUserPref };
+export function forceSavePrefs() {
+  if (saveTimeout) {
+    clearTimeout(saveTimeout);
+    saveTimeout = null;
+  }
+  if (prefsStore.size === 0) return;
+  const data = Object.fromEntries(prefsStore);
+  safeWriteJson(config.userPrefsFile, data);
+}
+
+export default { initPrefs, getUserPrefs, trackInteraction, buildStyleInstruction, setUserPref, forceSavePrefs };

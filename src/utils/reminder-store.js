@@ -354,6 +354,12 @@ export function cancelReminderRowsForUser(userId) {
   `).run(Date.now(), userId).changes;
 }
 
+export async function backupDatabase(destPath) {
+  if (!db) return false;
+  await db.backup(destPath);
+  return true;
+}
+
 export function getReminderStorePath() {
   return path.resolve(config.remindersDbPath);
 }

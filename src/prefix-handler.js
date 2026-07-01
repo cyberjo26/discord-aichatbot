@@ -885,7 +885,7 @@ async function handleWeather(message, args) {
 
 async function handleInvite(message) {
   const clientId = message.client.user.id;
-  const inviteUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&permissions=8&scope=bot%20applications.commands`;
+  const inviteUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&permissions=3230720&scope=bot%20applications.commands`;
 
   const embed = new EmbedBuilder()
     .setColor('#5865F2')

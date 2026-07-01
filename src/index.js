@@ -4,15 +4,18 @@ import logger from './utils/logger.js';
 import { handlePrefixCommand } from './prefix-handler.js';
 import { handleMention } from './mention-handler.js';
 import { chatCompletion } from './ai/openrouter.js';
-import { initPrefs } from './utils/user-prefs.js';
+import { initPrefs, forceSavePrefs } from './utils/user-prefs.js';
 import { initWakeSleep, isBotAwake } from './utils/wake-sleep.js';
-import { initPatterns } from './utils/learned-patterns.js';
+import { initPatterns, forceSavePatterns } from './utils/learned-patterns.js';
 import { initWarnings, addWarning } from './utils/warnings.js';
 import { hasPendingLearn, addExplanation, completeLearning } from './utils/learned-patterns.js';
-import { initServerSettings, getSetting } from './utils/server-settings.js';
+import { initServerSettings, getSetting, forceSaveSettings } from './utils/server-settings.js';
 import { initVoiceMaster, handleVoiceStateUpdate } from './utils/voicemaster.js';
 import { closeDB, initReminders, stopReminderPolling } from './utils/reminders.js';
 import { handleVoiceWelcome } from './voice/welcome.js';
+import { initBackups } from './utils/backup.js';
+import { checkRateLimit, cleanupRateLimits, releaseRateLimit } from './utils/rate-limit.js';
+import { healthCheck } from './utils/health.js';
 
 // Import commands
 import * as askCmd from './commands/ask.js';
@@ -87,6 +90,35 @@ client.once('ready', async () => {
     logger.error(`Reminder database initialization failed: ${err.message}`);
     shutdown('REMINDER_DB_INIT_FAILED', 1);
   }
+  
+  // Initialize backups
+  initBackups();
+  
+  // Initialize health check loop (5 mins)
+  setInterval(async () => {
+    try {
+      const h = await healthCheck();
+      if (h.status !== 'healthy') {
+        logger.warn(`Health check degraded: DB=${h.checks.database}, AI=${h.checks.aiStatus}`);
+      }
+      
+      // Memory cleanup
+      cleanupRateLimits();
+      const now = Date.now();
+      let cleanedHistory = 0;
+      for (const [key, history] of userMessageHistory.entries()) {
+        const lastTime = history[history.length - 1]?.timestamp || 0;
+        if (now - lastTime > 60000) { // 1 min TTL
+          userMessageHistory.delete(key);
+          cleanedHistory++;
+        }
+      }
+      if (cleanedHistory > 0) logger.debug(`Cleaned ${cleanedHistory} entries from userMessageHistory`);
+      
+    } catch (err) {
+      logger.error(`Health check failed: ${err.message}`);
+    }
+  }, 5 * 60 * 1000);
 });
 
 // Slash commands
@@ -97,6 +129,15 @@ client.on('interactionCreate', async (interaction) => {
   if (!command) {
     logger.warn(`Unknown command: ${interaction.commandName}`);
     return;
+  }
+
+  const { allowed, remaining, resetIn, reason } = checkRateLimit(interaction.user.id, interaction.guild?.id);
+  if (!allowed) {
+    const s = Math.ceil(resetIn / 1000);
+    if (reason === 'global_concurrency') {
+      return interaction.reply({ content: `⏳ Server AI sedang sibuk. Coba beberapa saat lagi.`, ephemeral: true });
+    }
+    return interaction.reply({ content: `⏳ Wah, kamu terlalu cepat! Tunggu ${s} detik lagi ya.`, ephemeral: true });
   }
 
   try {
@@ -115,6 +156,8 @@ client.on('interactionCreate', async (interaction) => {
     } else {
       await interaction.reply(reply).catch(() => {});
     }
+  } finally {
+    releaseRateLimit();
   }
 });
 
@@ -253,11 +296,22 @@ client.on('messageCreate', async (message) => {
   // ─── Prefix commands (!) ──────────────────────────────────────
   if (!message.content.startsWith('!')) return;
 
+  const { allowed, remaining, resetIn, reason } = checkRateLimit(message.author.id, message.guild?.id);
+  if (!allowed) {
+    const s = Math.ceil(resetIn / 1000);
+    if (reason === 'global_concurrency') {
+      return message.reply(`⏳ Server AI sedang sibuk. Coba beberapa saat lagi.`).catch(() => {});
+    }
+    return message.reply(`⏳ Tunggu ${s} detik lagi sebelum pakai command.`).catch(() => {});
+  }
+
   try {
     await handlePrefixCommand(message);
   } catch (err) {
     logger.error(`Prefix command crashed: ${err.message}`);
     await message.reply('❌ Terjadi error. Coba lagi nanti.').catch(() => {});
+  } finally {
+    releaseRateLimit();
   }
 });
 
@@ -323,6 +377,12 @@ Bahasa Indonesia.`;
 
 function shutdown(signal, exitCode = 0) {
   logger.info(`${signal} received, shutting down...`);
+  
+  // Flush all stores to disk atomically
+  try { forceSavePrefs(); } catch(e) { logger.error(`Shutdown: savePrefs error: ${e.message}`); }
+  try { forceSaveSettings(); } catch(e) { logger.error(`Shutdown: saveSettings error: ${e.message}`); }
+  try { forceSavePatterns(); } catch(e) { logger.error(`Shutdown: savePatterns error: ${e.message}`); }
+  
   stopReminderPolling();
   try {
     closeDB();

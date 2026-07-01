@@ -45,12 +45,21 @@ export function getContext(userId) {
   };
 }
 
+const MAX_MEMORY_ENTRIES = 1000;
+
 /**
  * Add a message to user's conversation history.
  * Automatically extracts topics and periodically generates context summaries.
  */
 export function addMessage(userId, role, content) {
   if (!store.has(userId)) {
+    // Add limit check
+    if (store.size >= MAX_MEMORY_ENTRIES) {
+      // Remove oldest inactive entry
+      const entries = [...store.entries()].sort((a, b) => a[1].lastActive - b[1].lastActive);
+      store.delete(entries[0][0]);
+    }
+
     store.set(userId, {
       messages: [],
       topics: [],
@@ -158,12 +167,26 @@ async function generateContextSummary(userId, entry) {
 /**
  * Build context injection string for AI prompt
  */
-export function buildContextInjection(userId) {
+export function buildContextInjection(userId, messageContent = '') {
   const ctx = getContext(userId);
+  
+  // Only inject context if relevant to current query
+  // Check if query references previous conversation
+  const needsContext = /\b(tadi|sebelumnya|yang|itu|earlier|before|that|dia|mereka|nya)\b/i.test(messageContent);
+  
+  if (!needsContext && ctx.messages.length < 3) {
+    return ''; // Skip context for new conversations or simple queries
+  }
+
   const parts = [];
 
   if (ctx.contextSummary) {
-    parts.push(`KONTEKS PERCAKAPAN SEBELUMNYA: ${ctx.contextSummary}`);
+    // Compress context for long conversations
+    let summary = ctx.contextSummary;
+    if (summary.length > 200) {
+      summary = summary.slice(0, 150) + '...';
+    }
+    parts.push(`KONTEKS PERCAKAPAN SEBELUMNYA: ${summary}`);
   }
 
   if (ctx.topics.length > 0) {

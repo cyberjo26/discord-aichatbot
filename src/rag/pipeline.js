@@ -5,6 +5,19 @@ import { buildRagPrompt } from '../ai/prompts.js';
 import config from '../config.js';
 import logger from '../utils/logger.js';
 
+// Cache RAG results for frequently asked questions
+const ragCache = new Map(); // query key -> { answer, sources, timestamp }
+const RAG_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, val] of ragCache.entries()) {
+    if (now - val.timestamp > RAG_CACHE_TTL_MS) {
+      ragCache.delete(key);
+    }
+  }
+}, RAG_CACHE_TTL_MS / 2).unref();
+
 /**
  * Full RAG pipeline:
  * 1. Search web for query
@@ -16,6 +29,14 @@ import logger from '../utils/logger.js';
  * @returns {Promise<{answer: string, sources: Array<{title: string, url: string}>}>}
  */
 export async function ragPipeline(query) {
+  const cacheKey = query.toLowerCase().trim();
+  const cached = ragCache.get(cacheKey);
+  
+  if (cached && Date.now() - cached.timestamp < RAG_CACHE_TTL_MS) {
+    logger.info(`RAG cache hit for: "${query}"`);
+    return cached;
+  }
+
   logger.info(`RAG pipeline started: "${query}"`);
   const startTime = Date.now();
 
@@ -62,7 +83,10 @@ export async function ragPipeline(query) {
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   logger.success(`RAG pipeline completed in ${elapsed}s`);
 
-  return { answer, sources };
+  const result = { answer, sources, timestamp: Date.now() };
+  ragCache.set(cacheKey, result);
+
+  return result;
 }
 
 export default { ragPipeline };

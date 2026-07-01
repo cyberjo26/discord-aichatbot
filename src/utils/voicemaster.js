@@ -82,7 +82,7 @@ async function createTempChannel(state) {
     const tempChannel = await guild.channels.create({
       name: channelName,
       type: ChannelType.GuildVoice,
-      parent: hubChannel.parent, // same category
+      parent: hubChannel.parentId || undefined, // same category
       bitrate: hubChannel.bitrate,
       userLimit: hubChannel.userLimit || 0,
       permissionOverwrites: [

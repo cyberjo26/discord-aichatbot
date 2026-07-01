@@ -2,8 +2,33 @@ import fs from 'fs';
 import path from 'path';
 import config from '../config.js';
 import logger from './logger.js';
+import { safeWriteJson } from './file-utils.js';
 import { chatCompletion } from '../ai/openrouter.js';
 import { geminiEmbedding } from '../ai/providers/gemini.js';
+
+// Cache query embeddings for frequently asked queries
+const queryEmbeddingCache = new Map(); // Max 100 entries, LRU
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+async function getCachedEmbedding(query) {
+  const key = query.toLowerCase().trim();
+  const cached = queryEmbeddingCache.get(key);
+  
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+    return cached.embedding;
+  }
+  
+  const embedding = await geminiEmbedding(query);
+  
+  // Simple LRU: remove oldest if cache full
+  if (queryEmbeddingCache.size >= 100) {
+    const firstKey = queryEmbeddingCache.keys().next().value;
+    queryEmbeddingCache.delete(firstKey);
+  }
+  
+  queryEmbeddingCache.set(key, { embedding, timestamp: Date.now() });
+  return embedding;
+}
 
 // Simple text tokenizer
 function tokenize(text) {
@@ -182,10 +207,7 @@ function scheduleSave() {
         fs.mkdirSync(dir, { recursive: true });
       }
 
-      fs.writeFileSync(
-        config.learnedPatternsFile,
-        JSON.stringify({ patterns, updatedAt: new Date().toISOString() }, null, 2)
-      );
+      safeWriteJson(config.learnedPatternsFile, { patterns, updatedAt: new Date().toISOString() });
       logger.debug(`Learned patterns saved (${patterns.length} total)`);
     } catch (err) {
       logger.error(`Failed to save learned patterns: ${err.message}`);
@@ -305,6 +327,13 @@ KEMBALIKAN HANYA JSON VALID:
       usageCount: 0,
     };
 
+    const MAX_LEARNED_PATTERNS = 500;
+    if (patterns.length >= MAX_LEARNED_PATTERNS) {
+      // Remove least used pattern
+      patterns.sort((a, b) => (a.usageCount || 0) - (b.usageCount || 0));
+      patterns.shift();
+    }
+
     patterns.push(newPattern);
     pendingLearns.delete(channelId);
     scheduleSave();
@@ -340,7 +369,7 @@ export async function buildLearnedKnowledge(userQuery) {
 
   // Layer 1: Gemini Embeddings API (Semantic Search)
   try {
-    const queryEmbedding = await geminiEmbedding(userQuery);
+    const queryEmbedding = await getCachedEmbedding(userQuery);
     // Find all patterns that have embeddings
     const embedPatterns = patterns.filter(p => p.embedding && Array.isArray(p.embedding));
     if (embedPatterns.length > 0) {
@@ -350,11 +379,11 @@ export async function buildLearnedKnowledge(userQuery) {
       });
       // Sort by similarity descending
       scored.sort((a, b) => b.score - a.score);
-      // Filter by threshold (e.g. 0.65) and take top 3
-      const threshold = 0.65;
+      // Filter by threshold
+      const threshold = 0.70;
       matchedPatterns = scored
         .filter(item => item.score >= threshold)
-        .slice(0, 3)
+        .slice(0, 2)
         .map(item => item.pattern);
       
       if (matchedPatterns.length > 0) {
@@ -374,7 +403,7 @@ export async function buildLearnedKnowledge(userQuery) {
       const threshold = 0.3; // Simple TF-IDF score threshold
       matchedPatterns = scored
         .filter(item => item.score >= threshold)
-        .slice(0, 3)
+        .slice(0, 2)
         .map(item => item.pattern);
       
       if (matchedPatterns.length > 0) {
@@ -386,11 +415,12 @@ export async function buildLearnedKnowledge(userQuery) {
     }
   }
 
-  // Layer 3: Fallback to all patterns (like old behavior) if the first two returned nothing
+  // Layer 3: Fallback to summary instead of all patterns
   if (matchedPatterns.length === 0) {
-    matchedPatterns = patterns;
-    methodUsed = 'Emergency Fallback (All Patterns)';
-    hasMatch = false;
+    return {
+      prompt: `BOT SUDAH BELAJAR ${patterns.length} pattern khusus dari user. Jika user bertanya tentang sesuatu yang tidak jelas, tanyakan klarifikasi.`,
+      hasMatch: false,
+    };
   }
 
   logger.debug(`🧠 Pattern matching selected ${matchedPatterns.length} patterns using ${methodUsed}`);
@@ -425,6 +455,15 @@ export function getAllPatterns() {
   return [...patterns];
 }
 
+export function forceSavePatterns() {
+  if (saveTimeout) {
+    clearTimeout(saveTimeout);
+    saveTimeout = null;
+  }
+  if (patterns.length === 0) return;
+  safeWriteJson(config.learnedPatternsFile, { patterns, updatedAt: new Date().toISOString() });
+}
+
 export default {
   initPatterns,
   startPendingLearn,
@@ -435,4 +474,5 @@ export default {
   buildLearnedKnowledge,
   markPatternUsed,
   getAllPatterns,
+  forceSavePatterns,
 };

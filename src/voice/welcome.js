@@ -8,6 +8,15 @@ import { getSetting } from '../utils/server-settings.js';
 const welcomeCooldowns = new Map();
 const COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, timestamp] of welcomeCooldowns.entries()) {
+    if (now - timestamp > COOLDOWN_MS) {
+      welcomeCooldowns.delete(key);
+    }
+  }
+}, COOLDOWN_MS).unref();
+
 /**
  * Sanitize display name: Unicode normalize NFKC, remove emojis, control characters,
  * clean spaces, and limit to max 32 characters.

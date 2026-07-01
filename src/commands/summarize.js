@@ -3,6 +3,7 @@ import { scrapeUrl } from '../rag/scraper.js';
 import { chatCompletion } from '../ai/openrouter.js';
 import { SUMMARIZE_PROMPT } from '../ai/prompts.js';
 import { buildSummaryEmbed, buildErrorEmbed } from '../utils/formatter.js';
+import { isSafeUrl } from '../utils/security.js';
 import logger from '../utils/logger.js';
 
 export const data = new SlashCommandBuilder()
@@ -20,9 +21,9 @@ export async function execute(interaction) {
 
   logger.command(interaction.user.tag, 'summarize', url);
 
-  // Basic URL validation
-  if (!url.startsWith('http://') && !url.startsWith('https://')) {
-    const errorEmbed = buildErrorEmbed('URL harus dimulai dengan `http://` atau `https://`');
+  // URL validation to prevent SSRF
+  if (!(await isSafeUrl(url))) {
+    const errorEmbed = buildErrorEmbed('URL tidak valid atau dilarang (misalnya IP private/lokal).');
     return interaction.reply({ embeds: [errorEmbed], ephemeral: true });
   }
 

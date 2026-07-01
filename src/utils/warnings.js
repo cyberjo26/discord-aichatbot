@@ -1,6 +1,7 @@
 import fs from 'fs';
 import config from '../config.js';
 import logger from './logger.js';
+import { safeWriteJson } from './file-utils.js';
 
 const WARNINGS_FILE = config.dataDir + '/warnings.json';
 let warnings = {}; // { guildId: { userId: [{ reason, warnedBy, timestamp }] } }
@@ -24,12 +25,7 @@ export function initWarnings() {
 }
 
 function save() {
-  try {
-    if (!fs.existsSync(config.dataDir)) fs.mkdirSync(config.dataDir, { recursive: true });
-    fs.writeFileSync(WARNINGS_FILE, JSON.stringify(warnings, null, 2));
-  } catch (err) {
-    logger.error(`Failed to save warnings: ${err.message}`);
-  }
+  safeWriteJson(WARNINGS_FILE, warnings);
 }
 
 /**

@@ -17,19 +17,48 @@ import logger from './utils/logger.js';
 import { addWarning, getWarnings, clearWarnings } from './utils/warnings.js';
 import { getSetting, setSetting, removeSetting, getAllSettings } from './utils/server-settings.js';
 import { setupVoiceMaster, removeVoiceMaster, isVoiceMasterActive } from './utils/voicemaster.js';
+import { checkRateLimit } from './utils/rate-limit.js';
+import { recordMetric } from './utils/metrics.js';
 
 // ─── Message Deduplication ─────────────────────────────────────────
-const processedMessages = new Set();
+const processedMessages = new Map(); // messageId -> timestamp
 const DEDUP_TTL_MS = 30_000; // 30 seconds
 
 function isDuplicate(messageId) {
+  const now = Date.now();
+  
+  // Cleanup old entries
+  for (const [id, timestamp] of processedMessages) {
+    if (now - timestamp > DEDUP_TTL_MS) {
+      processedMessages.delete(id);
+    }
+  }
+  
   if (processedMessages.has(messageId)) return true;
-  processedMessages.add(messageId);
-  setTimeout(() => processedMessages.delete(messageId), DEDUP_TTL_MS);
+  
+  processedMessages.set(messageId, now);
   return false;
 }
 
+// Add input validation utility
+function sanitizeInput(text, maxLength = 2000) {
+  if (!text || typeof text !== 'string') return '';
+  
+  // Remove potential injection attempts (control chars)
+  const sanitized = text
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    .trim();
+  
+  return sanitized.slice(0, maxLength);
+}
+
 export async function handleMention(message) {
+  const rateLimit = checkRateLimit(message.author.id);
+  if (!rateLimit.allowed) {
+    await message.reply(`⏱️ Slow down! Coba lagi dalam ${Math.ceil(rateLimit.resetIn / 1000)} detik.`);
+    return;
+  }
+
   // Deduplicate — prevent processing same message multiple times
   if (isDuplicate(message.id)) {
     logger.warn(`⚠️ Duplikat pesan ${message.id}, skip.`);
@@ -38,7 +67,10 @@ export async function handleMention(message) {
 
   const client = message.client;
   const botId = client.user.id;
-  const rawContent = message.content.replace(new RegExp(`<@!?${botId}>`, 'g'), '').trim();
+  const rawContent = sanitizeInput(
+    message.content.replace(new RegExp(`<@!?${botId}>`, 'g'), '').trim(),
+    2000
+  );
 
   if (!rawContent) {
     if (isBotAwake()) await message.reply('Hai! Ada yang bisa aku bantu? 🤖');
@@ -118,6 +150,7 @@ export async function handleMention(message) {
         );
       }
       const totalMs = Date.now() - totalStart;
+      recordMetric('request', { success: true, latency: totalMs });
       logger.success(`✅ DONE — Total waktu: ${(totalMs / 1000).toFixed(1)}s (reason: ${(reasonMs / 1000).toFixed(1)}s + response: ${(respMs / 1000).toFixed(1)}s)`);
       logger.info(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
       return;
@@ -136,6 +169,7 @@ export async function handleMention(message) {
       // Action already sent its own reply, remove the pending message
       if (pendingReply) await pendingReply.delete().catch(() => { });
       const totalMs = Date.now() - totalStart;
+      recordMetric('request', { success: true, latency: totalMs });
       logger.success(`✅ DONE (replied by action) — Total waktu: ${(totalMs / 1000).toFixed(1)}s`);
       logger.info(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
       return;
@@ -150,10 +184,12 @@ export async function handleMention(message) {
     }
 
     const totalMs = Date.now() - totalStart;
+    recordMetric('request', { success: true, latency: totalMs });
     logger.success(`✅ DONE — Total waktu: ${(totalMs / 1000).toFixed(1)}s (reason: ${(reasonMs / 1000).toFixed(1)}s + action: ${(actionMs / 1000).toFixed(1)}s)`);
     logger.info(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
   } catch (err) {
     const totalMs = Date.now() - totalStart;
+    recordMetric('request', { success: false, latency: totalMs });
     logger.error(`❌ Mention handler error setelah ${(totalMs / 1000).toFixed(1)}s: ${err.message}`);
     logger.info(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     await message.reply('Aduh, ada yang error nih. Coba lagi ya.').catch(() => { });
@@ -304,9 +340,9 @@ const ROUTE_SCHEMA = {
 };
 
 const ACTION_HINT = /\b(mute|unmute|deafen|undeafen|disconnect|role|timeout|ban|kick|warn|pin|unpin|remind|ingatkan|ringkas|summary|summarize|announce|pengumuman|channel|voicemaster|config|setting|tidur|bangun|nickname|nick|ping|weather|cuaca|invite|undang)\b/i;
-const CODE_HINT = /```|\b(kode|coding|javascript|typescript|node\.?js|python|java|php|golang|rust|html|css|sql|bug|stack trace)\b/i;
+const CODE_HINT = /```|\b(kode|coding|javascript|typescript|node\.?js|python|java|php|golang|rust|html|css|sql|bug|error|crash|not working|ga jalan|stack trace)\b/i;
 const KNOWLEDGE_HINT = /^(apa|apakah|siapa|kenapa|mengapa|bagaimana|jelaskan|terangkan|what|who|why|how|explain)\b/i;
-const CHAT_HINT = /^(hai|halo|hello|hi|hey|pagi|siang|sore|malam|makasih|terima kasih|thanks|thank you)[!. ]*$/i;
+const CHAT_HINT = /^(hai|halo|hello|hi|hey|pagi|siang|sore|malam|makasih|terima kasih|thanks|thank you|oke|ok|baik|siap|mantap)[!. ]*$/i;
 
 function fastRoute(rawContent) {
   const text = rawContent.trim();
@@ -466,7 +502,7 @@ async function execWeather(message, params) {
 
 async function execInvite(message) {
   const clientId = message.client.user.id;
-  const inviteUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&permissions=8&scope=bot%20applications.commands`;
+  const inviteUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&permissions=3230720&scope=bot%20applications.commands`;
 
   const embed = new EmbedBuilder()
     .setColor('#5865F2')
@@ -717,17 +753,46 @@ async function execBanKick(message, params, action) {
   const reason = params.reason || 'Tidak disebutkan';
 
   try {
-    if (action === 'ban') {
-      await member.ban({ reason });
-    } else {
-      await member.kick(reason);
+    // Confirmation UI
+    const confirmId = `confirm_${action}_${member.id}_${Date.now()}`;
+    const cancelId = `cancel_${action}_${member.id}_${Date.now()}`;
+
+    const embed = new EmbedBuilder()
+      .setColor('#ff0000')
+      .setTitle(`⚠️ Konfirmasi ${action.toUpperCase()}`)
+      .setDescription(`Apakah kamu yakin ingin me-${action} **${member.displayName}**?\n**Alasan:** ${reason}`);
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(confirmId).setLabel('✅ Yakin').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(cancelId).setLabel('❌ Batal').setStyle(ButtonStyle.Secondary)
+    );
+
+    const reply = await message.reply({ embeds: [embed], components: [row] });
+
+    try {
+      const i = await reply.awaitMessageComponent({
+        filter: (interaction) => interaction.user.id === message.author.id,
+        time: 30000
+      });
+      await i.deferUpdate();
+
+      if (i.customId === confirmId) {
+        if (action === 'ban') {
+          await member.ban({ reason });
+        } else {
+          await member.kick(reason);
+        }
+        await reply.edit({ content: `✅ Berhasil me-${action} ${member.displayName}.`, embeds: [], components: [] });
+      } else {
+        await reply.edit({ content: `❌ Aksi ${action} dibatalkan.`, embeds: [], components: [] });
+      }
+      return { success: true, type: 'cancelled', replied: true };
+    } catch {
+      await reply.edit({ content: `⏰ Waktu konfirmasi habis. Aksi ${action} dibatalkan.`, embeds: [], components: [] });
+      return { success: true, type: 'cancelled', replied: true };
     }
-    return {
-      success: true,
-      type: action,
-      targetName: member.displayName,
-      reason,
-    };
+    // Return handled above in the confirmation logic
+
   } catch (err) {
     if (err.code === 50013) {
       return { success: false, error: `Bot tidak punya permission untuk ${action} ${member.displayName}.` };
@@ -1310,12 +1375,40 @@ async function execDeleteChannel(message, params) {
   const channelName = targetChannel.name;
 
   try {
-    await targetChannel.delete(`Dihapus oleh ${message.author.username} via bot`);
-    return {
-      success: true,
-      type: 'delete_channel',
-      channelName,
-    };
+    // Confirmation UI
+    const confirmId = `confirm_del_${targetChannel.id}_${Date.now()}`;
+    const cancelId = `cancel_del_${targetChannel.id}_${Date.now()}`;
+
+    const embed = new EmbedBuilder()
+      .setColor('#ff0000')
+      .setTitle('⚠️ Konfirmasi Hapus Channel')
+      .setDescription(`Apakah kamu yakin ingin menghapus channel **${channelName}**? Tindakan ini tidak bisa dibatalkan!`);
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(confirmId).setLabel('✅ Yakin Hapus').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(cancelId).setLabel('❌ Batal').setStyle(ButtonStyle.Secondary)
+    );
+
+    const reply = await message.reply({ embeds: [embed], components: [row] });
+
+    try {
+      const i = await reply.awaitMessageComponent({
+        filter: (interaction) => interaction.user.id === message.author.id,
+        time: 30000
+      });
+      await i.deferUpdate();
+
+      if (i.customId === confirmId) {
+        await targetChannel.delete(`Dihapus oleh ${message.author.username} via bot`);
+        await reply.edit({ content: `🗑️ Channel **${channelName}** sudah dihapus.`, embeds: [], components: [] });
+      } else {
+        await reply.edit({ content: '❌ Hapus channel dibatalkan.', embeds: [], components: [] });
+      }
+      return { success: true, type: 'cancelled', replied: true };
+    } catch {
+      await reply.edit({ content: '⏰ Waktu konfirmasi habis. Hapus channel dibatalkan.', embeds: [], components: [] });
+      return { success: true, type: 'cancelled', replied: true };
+    }
   } catch (err) {
     return { success: false, error: `Gagal menghapus channel: ${err.message}` };
   }
@@ -1637,7 +1730,7 @@ async function generateNaturalResponse(plan, result, message) {
   if (plan.action === 'chat' || plan.action === 'knowledge' || plan.action === 'code_help') {
     const ctx = getContext(userId);
     const systemPrompt = buildJarvisPrompt({
-      contextInjection: buildContextInjection(userId),
+      contextInjection: buildContextInjection(userId, rawQuery),
       styleInstruction: buildStyleInstruction(userId),
       userTopics: ctx.topics,
       responseStyle: plan.response_style,

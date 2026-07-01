@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import config from '../config.js';
 import logger from './logger.js';
+import { safeWriteJson } from './file-utils.js';
 
 /**
  * Jarvis Wake/Sleep Mode
@@ -38,19 +39,7 @@ export function initWakeSleep() {
  * Save state to disk
  */
 function saveState() {
-  try {
-    const dir = path.dirname(config.wakeSleepFile);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-
-    fs.writeFileSync(
-      config.wakeSleepFile,
-      JSON.stringify({ isAwake, updatedAt: new Date().toISOString() }, null, 2)
-    );
-  } catch (err) {
-    logger.error(`Failed to save wake/sleep state: ${err.message}`);
-  }
+  safeWriteJson(config.wakeSleepFile, { isAwake, updatedAt: new Date().toISOString() });
 }
 
 /**

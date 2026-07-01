@@ -4,6 +4,8 @@ import { chatCompletion, getAiStats } from '../ai/openrouter.js';
 import { clearHistory } from '../utils/memory.js';
 import config from '../config.js';
 import logger from '../utils/logger.js';
+import { getMetrics } from '../utils/metrics.js';
+import { healthCheck } from '../utils/health.js';
 
 export const data = new SlashCommandBuilder()
   .setName('admin')
@@ -118,6 +120,12 @@ async function handleStatus(interaction) {
     return `**${name}**: ${state}, ${stats?.successes || 0}/${stats?.requests || 0} sukses, avg ${stats?.averageLatencyMs || 0}ms`;
   }).join('\n');
 
+  const metrics = getMetrics();
+  const health = await healthCheck();
+  
+  const metricsStr = `Requests: ${metrics.requests.success}/${metrics.requests.total} sukses | Avg: ${metrics.avgLatency}ms | P95: ${metrics.p95Latency}ms`;
+  const healthStr = `Status: ${health.status.toUpperCase()} | AI: ${health.checks.aiStatus}`;
+
   const embed = new EmbedBuilder()
     .setColor(0x57f287)
     .setTitle('📊 Bot Status')
@@ -125,6 +133,8 @@ async function handleStatus(interaction) {
       { name: '⏱️ Uptime', value: `${hours}h ${minutes}m ${seconds}s`, inline: true },
       { name: '💾 Memory', value: `${memMB} MB`, inline: true },
       { name: '🌐 Servers', value: `${interaction.client.guilds.cache.size}`, inline: true },
+      { name: '🏥 Health', value: healthStr, inline: false },
+      { name: '📈 Metrics', value: metricsStr, inline: false },
       { name: '🤖 Provider order', value: config.aiProviderOrder.join(' → '), inline: false },
       { name: '📈 AI health', value: aiHealth, inline: false },
       { name: '🤖 OpenRouter model', value: config.primaryModel, inline: true },

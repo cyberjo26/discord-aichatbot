@@ -1,7 +1,8 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import config from '../config.js';
 import logger from './logger.js';
+import { safeWriteJson } from './file-utils.js';
 
 /**
  * ─── Server Settings ────────────────────────────────────────────────
@@ -52,10 +53,14 @@ function save() {
   try {
     const dir = dirname(SETTINGS_FILE);
     if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf-8');
+    safeWriteJson(SETTINGS_FILE, settings);
   } catch (err) {
     logger.error(`Failed to save server settings: ${err.message}`);
   }
+}
+
+export function forceSaveSettings() {
+  save();
 }
 
 /**
@@ -128,4 +133,5 @@ export default {
   setSetting,
   removeSetting,
   getAllSettings,
+  forceSaveSettings,
 };

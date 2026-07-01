@@ -2,6 +2,8 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import config from '../config.js';
 import logger from '../utils/logger.js';
+import { withRetry } from '../utils/network.js';
+import { isSafeUrl, safeHttpAgent, safeHttpsAgent } from '../utils/security.js';
 
 /**
  * Scrape the main text content from a URL.
@@ -9,20 +11,54 @@ import logger from '../utils/logger.js';
  * @param {string} url
  * @returns {Promise<string|null>} Extracted text or null on failure
  */
-export async function scrapeUrl(url) {
-  try {
-    const { data } = await axios.get(url, {
-      timeout: 10000,
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        Accept: 'text/html',
-      },
-      maxRedirects: 3,
-      responseType: 'text',
-    });
+export async function scrapeUrl(initialUrl) {
+  if (!(await isSafeUrl(initialUrl))) {
+    logger.warn(`SSRF Prevention: Blocked unsafe URL ${initialUrl}`);
+    return null;
+  }
 
-    const $ = cheerio.load(data);
+  return withRetry(async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout
+    
+    try {
+      let currentUrl = initialUrl;
+      let response;
+      
+      // Handle redirects manually to validate each step
+      for (let i = 0; i < 3; i++) {
+        response = await axios.get(currentUrl, {
+          timeout: 5000,
+          signal: controller.signal,
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            Accept: 'text/html, text/plain',
+          },
+          maxRedirects: 0, // Disable auto redirects
+          responseType: 'text',
+          validateStatus: (status) => status >= 200 && status < 400,
+          maxContentLength: 5 * 1024 * 1024, // Max 5MB
+          httpAgent: safeHttpAgent,
+          httpsAgent: safeHttpsAgent,
+        });
+        
+        if (response.status >= 300 && response.status < 400 && response.headers.location) {
+          currentUrl = new URL(response.headers.location, currentUrl).href;
+          if (!(await isSafeUrl(currentUrl))) {
+            throw new Error(`Unsafe redirect blocked: ${currentUrl}`);
+          }
+          continue;
+        }
+        break;
+      }
+      
+      const contentType = response.headers['content-type'] || '';
+      if (!contentType.includes('text/html') && !contentType.includes('text/plain')) {
+        throw new Error(`Invalid content type: ${contentType}`);
+      }
+            
+      const $ = cheerio.load(response.data);
 
     // Remove unwanted elements
     $('script, style, nav, footer, header, aside, iframe, noscript, .ad, .ads, .advertisement, [role="banner"], [role="navigation"]').remove();
@@ -55,12 +91,17 @@ export async function scrapeUrl(url) {
       text = text.slice(0, config.maxContentLength) + '...';
     }
 
-    logger.debug(`Scraped ${url}: ${text.length} chars`);
+    logger.debug(`Scraped ${initialUrl}: ${text.length} chars`);
     return text || null;
-  } catch (err) {
-    logger.debug(`Failed to scrape ${url}: ${err.message}`);
+    } catch (err) {
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }, 2, 500).catch(err => {
+    logger.debug(`Failed to scrape ${initialUrl}: ${err.message}`);
     return null;
-  }
+  });
 }
 
 /**
