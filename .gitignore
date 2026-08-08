@@ -4,13 +4,10 @@ node_modules/
 *.wav
 temp/
 logs/
-data/*.db
-data/*.db-wal
-data/*.db-shm
-data/temp-tests/
-data/*.json
+data/
 *.rar
 .agents/
 .vscode/
 .zcode/
 graphify-out/
+*.md
