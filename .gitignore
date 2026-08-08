@@ -10,3 +10,7 @@ data/*.db-shm
 data/temp-tests/
 data/*.json
 *.rar
+.agents/
+.vscode/
+.zcode/
+graphify-out/
