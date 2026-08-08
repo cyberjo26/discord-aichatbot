@@ -283,7 +283,7 @@ Please run `npm run lint` and `npm test` before submitting.
 
 ## 📄 License
 
-MIT © [Your Name]
+MIT © CyberJo26
 
 ---
 
