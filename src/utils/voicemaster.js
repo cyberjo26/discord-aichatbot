@@ -13,8 +13,15 @@ import logger from './logger.js';
  * 4. When all users leave the temp VC, it's automatically deleted
  */
 
-// Track active temporary channels: Set of channel IDs
-const activeTempChannels = new Set();
+// Track active temporary channels per guild: Map<guildId, Set<channelId>>
+const activeTempChannels = new Map();
+
+function getGuildChannels(guildId) {
+  if (!activeTempChannels.has(guildId)) {
+    activeTempChannels.set(guildId, new Set());
+  }
+  return activeTempChannels.get(guildId);
+}
 
 /**
  * Initialize VoiceMaster — load active temp channels from guilds
@@ -35,7 +42,7 @@ export async function initVoiceMaster(client) {
           logger.debug(`🧹 VoiceMaster cleaned up empty channel: ${channelId}`);
         } catch { /* channel may already be deleted */ }
       } else if (ch) {
-        activeTempChannels.add(channelId);
+        getGuildChannels(guild.id).add(channelId);
       }
     }
 
@@ -101,7 +108,7 @@ async function createTempChannel(state) {
     });
 
     // Track it
-    activeTempChannels.add(tempChannel.id);
+    getGuildChannels(guild.id).add(tempChannel.id);
     saveTempChannels(guild.id);
 
     // Move the user to the new channel
@@ -117,14 +124,15 @@ async function createTempChannel(state) {
  */
 async function cleanupIfEmpty(state) {
   const channelId = state.channelId;
-  if (!activeTempChannels.has(channelId)) return;
-
   const guild = state.guild;
+  const guildChannels = getGuildChannels(guild.id);
+  if (!guildChannels.has(channelId)) return;
+
   const channel = guild.channels.cache.get(channelId);
 
   if (!channel) {
     // Channel already deleted
-    activeTempChannels.delete(channelId);
+    guildChannels.delete(channelId);
     saveTempChannels(guild.id);
     return;
   }
@@ -133,7 +141,7 @@ async function cleanupIfEmpty(state) {
     try {
       const name = channel.name;
       await channel.delete('VoiceMaster: temp channel empty');
-      activeTempChannels.delete(channelId);
+      guildChannels.delete(channelId);
       saveTempChannels(guild.id);
       logger.info(`🗑️ VoiceMaster: Deleted empty channel "${name}"`);
     } catch (err) {
@@ -146,10 +154,8 @@ async function cleanupIfEmpty(state) {
  * Persist active temp channel IDs to server settings
  */
 function saveTempChannels(guildId) {
-  const tempIds = [...activeTempChannels].filter(id => {
-    // Only keep channels that belong to this guild (best effort)
-    return true;
-  });
+  const guildChannels = activeTempChannels.get(guildId);
+  const tempIds = guildChannels ? [...guildChannels] : [];
   setSetting(guildId, 'voicemasterTempChannels', tempIds);
 }
 

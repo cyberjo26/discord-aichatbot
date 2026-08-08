@@ -6,6 +6,7 @@ import config from '../config.js';
 import logger from '../utils/logger.js';
 import { getMetrics } from '../utils/metrics.js';
 import { healthCheck } from '../utils/health.js';
+import { getSetting, setSetting } from '../utils/server-settings.js';
 
 export const data = new SlashCommandBuilder()
   .setName('admin')
@@ -51,6 +52,17 @@ export const data = new SlashCommandBuilder()
     sub
       .setName('voice')
       .setDescription('Lihat siapa saja yang sedang ada di voice channel')
+  )
+  .addSubcommand((sub) =>
+    sub
+      .setName('voice-welcome')
+      .setDescription('Aktifkan/matikan sapaan suara saat user masuk voice channel')
+      .addBooleanOption((opt) =>
+        opt
+          .setName('enabled')
+          .setDescription('true = aktifkan, false = matikan. Kosongkan untuk cek status.')
+          .setRequired(false)
+      )
   );
 
 export async function execute(interaction) {
@@ -73,6 +85,8 @@ export async function execute(interaction) {
       return handleSetModel(interaction);
     case 'voice':
       return handleVoice(interaction);
+    case 'voice-welcome':
+      return handleVoiceWelcomeToggle(interaction);
   }
 }
 
@@ -223,4 +237,31 @@ async function handleVoice(interaction) {
   }
 
   await interaction.reply({ embeds: [embed], ephemeral: true });
+}
+
+async function handleVoiceWelcomeToggle(interaction) {
+  const guildId = interaction.guildId;
+  if (!guildId) {
+    return interaction.reply({ content: '❌ Perintah ini hanya bisa digunakan di server.', ephemeral: true });
+  }
+
+  const enabledOpt = interaction.options.getBoolean('enabled');
+  const currentRaw = getSetting(guildId, 'voiceWelcomeEnabled');
+  const current = currentRaw === false ? false : true;
+
+  if (enabledOpt === null) {
+    const status = current ? '🟢 AKTIF' : '🔴 NONAKTIF';
+    return interaction.reply({
+      content: `🔊 Voice welcome untuk server ini: **${status}**\nGunakan opsi \`enabled: true/false\` untuk mengubah.`,
+      ephemeral: true,
+    });
+  }
+
+  setSetting(guildId, 'voiceWelcomeEnabled', enabledOpt);
+  const status = enabledOpt ? '🟢 AKTIF' : '🔴 NONAKTIF';
+  logger.info(`Owner ${interaction.user.tag} set voice-welcome → ${enabledOpt} for guild ${guildId}`);
+  return interaction.reply({
+    content: `✅ Voice welcome sekarang: **${status}**`,
+    ephemeral: true,
+  });
 }

@@ -1,4 +1,5 @@
 import { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
+import { buildInviteUrl } from '../utils/invite-permissions.js';
 
 export const data = new SlashCommandBuilder()
   .setName('invite')
@@ -6,12 +7,14 @@ export const data = new SlashCommandBuilder()
 
 export async function execute(interaction) {
   const clientId = interaction.client.user.id;
-  const inviteUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&permissions=3230720&scope=bot%20applications.commands`;
+  const inviteUrl = buildInviteUrl(clientId);
 
   const embed = new EmbedBuilder()
     .setColor('#5865F2')
     .setTitle('🤖 Undang Bot Ini Ke Server Kamu!')
-    .setDescription('Klik tombol di bawah ini untuk mengundang bot ini ke server lain dengan hak akses standar.');
+    .setDescription(
+      'Klik tombol di bawah untuk mengundang bot dengan **semua permission** yang dibutuhkan (moderasi, voice control, manage channels/roles/nicknames, dsb).'
+    );
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()

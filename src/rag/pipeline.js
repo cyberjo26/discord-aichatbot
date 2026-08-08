@@ -2,7 +2,6 @@ import { webSearch } from './search.js';
 import { scrapeMultiple } from './scraper.js';
 import { chatCompletion } from '../ai/openrouter.js';
 import { buildRagPrompt } from '../ai/prompts.js';
-import config from '../config.js';
 import logger from '../utils/logger.js';
 
 // Cache RAG results for frequently asked questions
@@ -18,6 +17,21 @@ setInterval(() => {
   }
 }, RAG_CACHE_TTL_MS / 2).unref();
 
+function normalizeQuery(query) {
+  if (!query || typeof query !== 'string') return '';
+  return query
+    .toLowerCase()
+    .trim()
+    .replace(/[.,/#!$%^&*;:{}=_`~()?-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\bnode\s*js\b/g, 'nodejs')
+    .replace(/\bnext\s*js\b/g, 'nextjs')
+    .replace(/\breact\s*js\b/g, 'reactjs')
+    .replace(/\bvue\s*js\b/g, 'vuejs')
+    .replace(/\bdiscord\s*js\b/g, 'discordjs');
+}
+
 /**
  * Full RAG pipeline:
  * 1. Search web for query
@@ -29,7 +43,13 @@ setInterval(() => {
  * @returns {Promise<{answer: string, sources: Array<{title: string, url: string}>}>}
  */
 export async function ragPipeline(query) {
-  const cacheKey = query.toLowerCase().trim();
+  if (!query || !query.trim()) {
+    return { answer: 'Kueri kosong.', sources: [] };
+  }
+  const cacheKey = normalizeQuery(query);
+  if (!cacheKey) {
+    return { answer: 'Kueri tidak valid setelah normalisasi.', sources: [] };
+  }
   const cached = ragCache.get(cacheKey);
   
   if (cached && Date.now() - cached.timestamp < RAG_CACHE_TTL_MS) {

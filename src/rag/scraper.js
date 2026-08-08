@@ -60,41 +60,39 @@ export async function scrapeUrl(initialUrl) {
             
       const $ = cheerio.load(response.data);
 
-    // Remove unwanted elements
-    $('script, style, nav, footer, header, aside, iframe, noscript, .ad, .ads, .advertisement, [role="banner"], [role="navigation"]').remove();
+      // Remove unwanted elements
+      $('script, style, nav, footer, header, aside, iframe, noscript, .ad, .ads, .advertisement, [role="banner"], [role="navigation"]').remove();
 
-    // Try to find main content in order of preference
-    let text = '';
-    const selectors = ['article', 'main', '[role="main"]', '.post-content', '.entry-content', '.article-body', '.content'];
+      // Try to find main content in order of preference
+      let text = '';
+      const selectors = ['article', 'main', '[role="main"]', '.post-content', '.entry-content', '.article-body', '.content'];
 
-    for (const selector of selectors) {
-      const el = $(selector);
-      if (el.length > 0) {
-        text = el.text();
-        break;
+      for (const selector of selectors) {
+        const el = $(selector);
+        if (el.length > 0) {
+          text = el.text();
+          break;
+        }
       }
-    }
 
-    // Fallback to body
-    if (!text) {
-      text = $('body').text();
-    }
+      // Fallback to body
+      if (!text) {
+        text = $('body').text();
+      }
 
-    // Clean up whitespace
-    text = text
-      .replace(/\s+/g, ' ')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
+      // Clean up whitespace
+      text = text
+        .replace(/\s+/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
 
-    // Truncate
-    if (text.length > config.maxContentLength) {
-      text = text.slice(0, config.maxContentLength) + '...';
-    }
+      // Truncate
+      if (text.length > config.maxContentLength) {
+        text = text.slice(0, config.maxContentLength) + '...';
+      }
 
-    logger.debug(`Scraped ${initialUrl}: ${text.length} chars`);
-    return text || null;
-    } catch (err) {
-      throw err;
+      logger.debug(`Scraped ${initialUrl}: ${text.length} chars`);
+      return text || null;
     } finally {
       clearTimeout(timeout);
     }

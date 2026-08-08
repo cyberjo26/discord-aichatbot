@@ -51,6 +51,16 @@ export async function playInVoiceChannelDirect(voiceChannel, audioBuffer) {
     logger.debug(`Voice connection: ${oldState.status} → ${newState.status}`);
   });
 
+  // Unhandled 'error' events crash the Node process — log and destroy instead,
+  // otherwise a mid-playback transport error leaks the voice connection until
+  // the process restarts.
+  connection.on('error', (err) => {
+    logger.error(`Voice connection error: ${err.message}`);
+    if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
+      connection.destroy();
+    }
+  });
+
   // Handle disconnection/reconnection
   connection.on(VoiceConnectionStatus.Disconnected, async () => {
     try {
@@ -100,33 +110,51 @@ export async function playInVoiceChannelDirect(voiceChannel, audioBuffer) {
   logger.info('Playing audio...');
 
   return new Promise((resolve, reject) => {
+    let finished = false;
+    // Declared before `finish` to avoid a TDZ reference when the timer fires.
+    let safetyTimer;
+    // Run a terminal path exactly once; cancels the safety timer so a resolved
+    // playback never leaves a dangling force-disconnect behind.
+    const finish = (cb) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(safetyTimer);
+      cb();
+    };
+
+    // Safety timeout: disconnect after 60 seconds no matter what
+    safetyTimer = setTimeout(() => {
+      finish(() => {
+        if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
+          logger.warn('Safety timeout: force disconnecting');
+          connection.destroy();
+        }
+        resolve();
+      });
+    }, 60_000);
+
     player.on(AudioPlayerStatus.Idle, () => {
       logger.debug('Audio finished, disconnecting in 2s...');
       setTimeout(() => {
-        if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
-          connection.destroy();
-        }
-        logger.info('Disconnected from voice channel');
-        resolve();
+        finish(() => {
+          if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
+            connection.destroy();
+          }
+          logger.info('Disconnected from voice channel');
+          resolve();
+        });
       }, 2000);
     });
 
     player.on('error', (err) => {
       logger.error(`Audio player error: ${err.message}`);
-      if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
-        connection.destroy();
-      }
-      reject(err);
+      finish(() => {
+        if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
+          connection.destroy();
+        }
+        reject(err);
+      });
     });
-
-    // Safety timeout: disconnect after 60 seconds no matter what
-    setTimeout(() => {
-      if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
-        logger.warn('Safety timeout: force disconnecting');
-        connection.destroy();
-        resolve();
-      }
-    }, 60_000);
   });
 }
 

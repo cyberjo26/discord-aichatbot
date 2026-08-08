@@ -1,8 +1,6 @@
 import assert from 'assert';
 import { isSafeUrl } from './utils/security.js';
 import { checkRateLimit, releaseRateLimit, cleanupRateLimits } from './utils/rate-limit.js';
-import fs from 'fs';
-import path from 'path';
 
 async function runTests() {
   console.log('--- SECURITY & RELIABILITY TESTS ---');
@@ -38,7 +36,7 @@ async function runTests() {
   for (let i = 0; i < 25; i++) {
     const res = checkRateLimit(userId, null);
     if (res.allowed) allowedCount++;
-    releaseRateLimit(); // Release concurrency so it doesn't block
+    releaseRateLimit(res.token); // Release concurrency so it doesn't block
   }
   assert.strictEqual(allowedCount, 20, `User rate limit failed: expected 20, got ${allowedCount}`);
 
@@ -49,20 +47,24 @@ async function runTests() {
   for (let i = 0; i < 160; i++) {
     const res = checkRateLimit(userId2 + '_' + i, guildId);
     if (res.allowed) allowedCount++;
-    releaseRateLimit();
+    releaseRateLimit(res.token);
   }
   assert.strictEqual(allowedCount, 150, `Guild rate limit failed: expected 150, got ${allowedCount}`);
 
   // Concurrency limit
   allowedCount = 0;
+  const tokens = [];
   for (let i = 0; i < 60; i++) {
     const res = checkRateLimit(`user_${i}`, null);
-    if (res.allowed) allowedCount++;
+    if (res.allowed) {
+      allowedCount++;
+      tokens.push(res.token);
+    }
   }
   assert.strictEqual(allowedCount, 50, `Concurrency rate limit failed: expected 50, got ${allowedCount}`);
   
   // Cleanup concurrency
-  for (let i = 0; i < 50; i++) releaseRateLimit();
+  for (const token of tokens) releaseRateLimit(token);
   console.log('✅ Rate Limit tests passed.');
 
   // 3. Backup Path Validation

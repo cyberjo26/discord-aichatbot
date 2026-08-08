@@ -6,6 +6,7 @@ import { isGroqEnabled, groqCompletion } from './providers/groq.js';
 import { isCerebrasEnabled, cerebrasCompletion } from './providers/cerebras.js';
 import { isPollinationsEnabled, pollinationsCompletion } from './providers/pollinations.js';
 import { isPuterEnabled, puterCompletion } from './providers/puter.js';
+import { isCustomEnabled, customCompletion } from './providers/custom-openai.js';
 
 const providers = {
   openrouter: { enabled: isOpenRouterEnabled, complete: openRouterCompletion },
@@ -14,6 +15,7 @@ const providers = {
   cerebras: { enabled: isCerebrasEnabled, complete: cerebrasCompletion },
   pollinations: { enabled: isPollinationsEnabled, complete: pollinationsCompletion },
   puter: { enabled: isPuterEnabled, complete: puterCompletion },
+  custom: { enabled: isCustomEnabled, complete: customCompletion },
 };
 
 const health = new Map(Object.keys(providers).map((name) => [name, {
@@ -24,25 +26,34 @@ const health = new Map(Object.keys(providers).map((name) => [name, {
   totalLatencyMs: 0,
 }]));
 
+// Cap error messages in logs so a long API response body can't spam the log file,
+// and strip control chars so embedded newlines can't break the line-based bot.log.
+function shortError(error) {
+  const msg = (error.message || String(error)).replace(/[\r\n\t]+/g, ' ').trim();
+  return msg.length > 200 ? `${msg.slice(0, 200)}…` : msg;
+}
+
 const TASK_TOKEN_LIMITS = {
-  routing: 150,
-  chat: 400,
-  knowledge: 600,
-  code_help: 800,
-  summarize: 300,
-  clarification: 100,
+  routing: config.maxTokensTask.routing,
+  chat: config.maxTokensTask.simpleChat,
+  knowledge: config.maxTokensTask.complexChat,
+  code_help: config.maxTokensTask.complexChat,
+  summarize: config.maxTokensTask.simpleChat,
+  clarification: config.maxTokensTask.routing,
 };
 
 let requestCount = 0;
 
-function providerOrder(opts) {
+export function providerOrder(opts) {
   if (opts.provider) return [opts.provider];
   const configured = [...config.aiProviderOrder];
   if (configured.length <= 1) return configured;
 
   // Rotate provider order for load balancing (round-robin)
-  const shift = requestCount % configured.length;
-  requestCount++;
+  // Keep the counter bounded by the provider count (modulo) so it never
+  // grows unbounded over the bot's lifetime.
+  const shift = requestCount;
+  requestCount = (requestCount + 1) % configured.length;
 
   return [...configured.slice(shift), ...configured.slice(0, shift)];
 }
@@ -72,12 +83,12 @@ function recordFailure(name, error, latencyMs) {
   state.errorTypes[errCode] = (state.errorTypes[errCode] || 0) + 1;
 
   if (errCode === 'QUOTA_EXHAUSTED') {
-    state.openUntil = Date.now() + 30 * 60 * 1000; // 30 minutes
+    state.openUntil = Date.now() + config.aiQuotaCooldownMs;
   } else if (errCode === 'RATE_LIMITED') {
-    state.openUntil = Date.now() + 2 * 60 * 1000; // 2 minutes
+    state.openUntil = Date.now() + config.aiRateLimitCooldownMs;
   } else if (errCode === 'TIMEOUT') {
     const timeoutCount = state.errorTypes['TIMEOUT'] || 1;
-    state.openUntil = Date.now() + Math.min(timeoutCount * 10000, 60000); // up to 60s
+    state.openUntil = Date.now() + Math.min(timeoutCount * config.aiRateLimitCooldownMs / 6, config.aiCircuitCooldownMs * 2);
   } else if (state.failures >= config.aiCircuitFailureThreshold) {
     state.openUntil = Date.now() + config.aiCircuitCooldownMs;
   }
@@ -110,12 +121,15 @@ export async function chatCompletion(messages, opts = {}) {
     } catch (error) {
       const latencyMs = Date.now() - startedAt;
       recordFailure(name, error, latencyMs);
-      failures.push(`${name}: ${error.message}`);
-      logger.warn(`AI gagal: provider=${name} code=${error.code || 'UNKNOWN'} latency=${latencyMs}ms; mencoba provider berikutnya`);
+      failures.push(`${name}: ${shortError(error)}`);
+      logger.warn(
+        `AI gagal: provider=${name} code=${error.code || 'UNKNOWN'} status=${error.status || '-'} latency=${latencyMs}ms retryable=${error.retryable === false ? 'no' : 'yes'} msg="${shortError(error)}"; mencoba provider berikutnya`
+      );
     }
   }
 
   logger.error(`Semua provider AI gagal: ${failures.join(' | ') || 'tidak ada provider aktif'}`);
+  logger.error(`Detail: order=[${order.join(', ')}] circuitOpen=${order.filter((n) => circuitOpen(n)).join(',') || '-'}`);
   throw new Error('Semua provider AI sedang tidak tersedia. Coba lagi sebentar.');
 }
 
@@ -131,4 +145,4 @@ export function getAiStats() {
   }]));
 }
 
-export default { chatCompletion, getAiStats };
+export default { chatCompletion, getAiStats, providerOrder };

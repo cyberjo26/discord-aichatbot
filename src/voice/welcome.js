@@ -56,6 +56,7 @@ export async function handleVoiceWelcome(oldState, newState, options = {}) {
 
   const guild = newState.guild;
   const guildId = guild.id;
+  if (getSetting(guildId, 'voiceWelcomeEnabled') === false) return;
   const userId = member.id;
 
   const oldChannelId = oldState.channelId;

@@ -9,3 +9,4 @@ data/*.db-wal
 data/*.db-shm
 data/temp-tests/
 data/*.json
+*.rar

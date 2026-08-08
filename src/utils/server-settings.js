@@ -80,11 +80,11 @@ export function getSettings(guildId) {
  */
 export function getSetting(guildId, key) {
   const guildSettings = settings[guildId];
-  if (guildSettings && guildSettings[key]) {
+  if (guildSettings && Object.prototype.hasOwnProperty.call(guildSettings, key)) {
     return guildSettings[key];
   }
   // Fallback to config (.env values)
-  if (config[key]) return config[key];
+  if (config[key] !== undefined) return config[key];
   return null;
 }
 
@@ -123,6 +123,8 @@ export function getAllSettings(guildId) {
     welcomeChannelId: guildSettings.welcomeChannelId || config.welcomeChannelId || null,
     announceChannelId: guildSettings.announceChannelId || config.announceChannelId || null,
     voicemasterHubId: guildSettings.voicemasterHubId || null,
+    voiceWelcomeEnabled:
+      guildSettings.voiceWelcomeEnabled !== undefined ? guildSettings.voiceWelcomeEnabled : true,
   };
 }
 

@@ -1,17 +1,16 @@
 import {
   SlashCommandBuilder,
-  AttachmentBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
   ComponentType,
 } from 'discord.js';
 import { chatCompletion } from '../ai/openrouter.js';
-import { SYSTEM_PROMPT } from '../ai/prompts.js';
+import { buildSystemPrompt } from '../ai/prompts.js';
 import { ragPipeline } from '../rag/pipeline.js';
-import { condenseForVoice, synthesize } from '../voice/tts.js';
-import { playInVoiceChannel, getMemberVoiceChannel } from '../voice/player.js';
 import { buildAnswerEmbed, buildErrorEmbed } from '../utils/formatter.js';
+import { buildStyleInstruction } from '../utils/user-prefs.js';
+import { handleVoiceResponse } from '../utils/voice-response.js';
 import logger from '../utils/logger.js';
 
 export const data = new SlashCommandBuilder()
@@ -42,11 +41,15 @@ export async function execute(interaction) {
   await interaction.deferReply();
 
   try {
+    // Build personalized system prompt with style instructions
+    const styleInstruction = buildStyleInstruction(interaction.user.id);
+    const systemPrompt = buildSystemPrompt(styleInstruction);
+
     // ── Step 1: Answer naturally (no web search) ──────────────────
     const answer = await chatCompletion([
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: systemPrompt },
       { role: 'user', content: query },
-    ]);
+    ], { task: 'chat' });
 
     // Build embed (no sources yet)
     const embed = buildAnswerEmbed({ query, answer, sources: [], mode });
@@ -63,7 +66,13 @@ export async function execute(interaction) {
 
     // ── Step 2: Handle voice mode ─────────────────────────────────
     if (mode === 'voice') {
-      await handleVoiceResponse(interaction, answer, replyOptions);
+      try {
+        await handleVoiceResponse(interaction.member, answer, interaction, replyOptions);
+      } catch (voiceErr) {
+        logger.error(`Voice error: ${voiceErr.message}`);
+        replyOptions.content = '⚠️ *Voice gagal, menampilkan jawaban teks saja.*';
+        await interaction.editReply(replyOptions);
+      }
     } else {
       await interaction.editReply(replyOptions);
     }
@@ -119,36 +128,5 @@ export async function execute(interaction) {
       'Maaf, terjadi kesalahan saat memproses pertanyaanmu. Coba lagi nanti ya!'
     );
     await interaction.editReply({ embeds: [errorEmbed], components: [] });
-  }
-}
-
-/**
- * Handle voice response — condense, synthesize, and play/send audio
- */
-async function handleVoiceResponse(interaction, answer, replyOptions) {
-  try {
-    const voiceText = await condenseForVoice(answer);
-    logger.debug(`Voice text: "${voiceText}"`);
-
-    const audioBuffer = await synthesize(voiceText);
-    const voiceChannel = getMemberVoiceChannel(interaction.member);
-
-    if (voiceChannel) {
-      await interaction.editReply(replyOptions);
-      await playInVoiceChannel(voiceChannel, audioBuffer);
-    } else {
-      const attachment = new AttachmentBuilder(audioBuffer, {
-        name: 'bot-response.mp3',
-        description: 'Jawaban voice dari bot',
-      });
-      replyOptions.files = [attachment];
-      replyOptions.content =
-        '🔊 *Kamu tidak sedang di voice channel, jadi aku kirim audionya di sini.*';
-      await interaction.editReply(replyOptions);
-    }
-  } catch (voiceErr) {
-    logger.error(`Voice error: ${voiceErr.message}`);
-    replyOptions.content = '⚠️ *Voice gagal, menampilkan jawaban teks saja.*';
-    await interaction.editReply(replyOptions);
   }
 }

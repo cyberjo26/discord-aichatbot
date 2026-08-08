@@ -1,12 +1,27 @@
 import { getAiStats } from '../ai/router.js';
 import { openReminderStore } from './reminder-store.js';
+import { Status } from 'discord.js';
+
+const READY = Status.Ready;
+
+function gatewayStatus(client) {
+  if (!client) return { status: 'unknown' };
+  const ws = client.ws?.status;
+  const ready = client.isReady?.() || false;
+  return {
+    status: ready && ws === READY ? 'healthy' : 'unhealthy',
+    ws,
+    ready,
+    ping: client.ws?.ping ?? null,
+  };
+}
 
 /**
  * Perform a health check of critical services.
  * 
  * @returns {Promise<Object>}
  */
-export async function healthCheck() {
+export async function healthCheck(client = null) {
   const health = {
     status: 'healthy',
     timestamp: new Date().toISOString(),
@@ -44,6 +59,13 @@ export async function healthCheck() {
     health.status = 'degraded';
   }
   
+  // Check Discord gateway
+  const gw = gatewayStatus(client);
+  health.checks.gateway = gw;
+  if (gw.status === 'unhealthy') {
+    health.status = 'degraded';
+  }
+
   return health;
 }
 

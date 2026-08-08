@@ -32,6 +32,7 @@ const logFile = path.join(logDir, 'bot.log');
 function writeToFile(level, ...args) {
   try {
     const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ');
+    // eslint-disable-next-line no-control-regex -- intentional ANSI escape stripping
     const plainText = message.replace(/\x1b\[[0-9;]*m/g, '');
     const dateStamp = getDateString() + ' ' + timestamp();
     fs.appendFileSync(logFile, `[${dateStamp}] [${level}] ${plainText}\n`);

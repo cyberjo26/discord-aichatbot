@@ -1,0 +1,18 @@
+{
+  "user-id": {
+    "responseStyle": "balanced",
+    "language": "id",
+    "interactionCount": 3,
+    "avgMessageLength": 8,
+    "preferMarkdown": true,
+    "lastUpdated": 1786166660523
+  },
+  "407516822284402690": {
+    "responseStyle": "balanced",
+    "language": "id",
+    "interactionCount": 1,
+    "avgMessageLength": 16,
+    "preferMarkdown": true,
+    "lastUpdated": 1786166889284
+  }
+}

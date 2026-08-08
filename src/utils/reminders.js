@@ -4,6 +4,7 @@ import config from '../config.js';
 import { synthesize } from '../voice/tts.js';
 import { playInGuildVoiceQueue, playInVoiceChannelDirect } from '../voice/player.js';
 import { sanitizeDisplayName } from '../voice/welcome.js';
+import { isBotAwake } from './wake-sleep.js';
 import {
   cancelReminderRow,
   cancelReminderRowsForUser,
@@ -29,13 +30,18 @@ export function parseDuration(text) {
   const normalized = text.toLowerCase().trim();
   let totalMs = 0;
 
+  // One regex per unit. Word forms ("menit", "minutes", "sec") are anchored with \b;
+  // bare compact letters (h/m/s) use a letter-guard so they match "1h", "10m", "30s"
+  // and compounds like "1h30m" once each — never twice (was: 1h -> 2h double-count).
   const patterns = [
-    { regex: /(\d+)\s*(?:detik|dtk|det|s(?:ec(?:ond)?s?)?)\b/gi, multiplier: 1000 },
-    { regex: /(\d+)\s*(?:menit|mnt|min(?:ute)?s?|m(?!s|i|e|n|a))\b/gi, multiplier: 60 * 1000 },
-    { regex: /(\d+)\s*(?:jam|hour?s?|h(?![a-z]))\b/gi, multiplier: 60 * 60 * 1000 },
-    { regex: /(\d+)h/gi, multiplier: 60 * 60 * 1000 },
-    { regex: /(\d+)m(?!s|i|e|n)/gi, multiplier: 60 * 1000 },
-    { regex: /(\d+)s\b/gi, multiplier: 1000 },
+    // days — word forms first, bare 'd' last
+    { regex: /(\d+)\s*(?:(?:hari|days?)\b|d(?![a-z]))/gi, multiplier: 24 * 60 * 60 * 1000 },
+    // seconds
+    { regex: /(\d+)\s*(?:(?:detik|dtk|det|sec(?:ond)?s?)\b|s(?![a-z]))/gi, multiplier: 1000 },
+    // minutes
+    { regex: /(\d+)\s*(?:(?:menit|mnt|min(?:ute)?s?)\b|m(?![a-z]))/gi, multiplier: 60 * 1000 },
+    // hours
+    { regex: /(\d+)\s*(?:(?:jam|hour(?:s)?|hrs?)\b|h(?![a-z]))/gi, multiplier: 60 * 60 * 1000 },
   ];
 
   for (const { regex, multiplier } of patterns) {
@@ -63,6 +69,11 @@ export function formatDuration(ms) {
   if (minutes < 60) return `${minutes} menit`;
 
   const hours = Math.floor(minutes / 60);
+  if (hours >= 24) {
+    const days = Math.floor(hours / 24);
+    const remainHours = hours % 24;
+    return remainHours === 0 ? `${days} hari` : `${days} hari ${remainHours} jam`;
+  }
   const remainMins = minutes % 60;
   if (remainMins === 0) return `${hours} jam`;
   return `${hours} jam ${remainMins} menit`;
@@ -251,8 +262,12 @@ async function deliverReminder(client, r) {
       }
       
       const voiceChannel = currentMember?.voice?.channel;
-      
-      if (voiceChannel && voiceChannel.type === ChannelType.GuildVoice) {
+
+      // Skip voice join while the bot is in sleep mode — reminder still
+      // gets delivered as text fallback below instead of being lost.
+      if (!isBotAwake()) {
+        logger.debug(`Reminder #${r.id}: voice skipped, bot sedang tidur.`);
+      } else if (voiceChannel && voiceChannel.type === ChannelType.GuildVoice) {
         const botMember = guild.members.me;
         const permissions = voiceChannel.permissionsFor(botMember);
         

@@ -33,10 +33,8 @@ export async function openRouterCompletion(messages, opts = {}) {
       temperature: opts.temperature ?? 0.7,
     };
 
-    // OpenRouter handles these fallbacks inside one HTTP request.
-    if (!opts.model && config.openRouterFallbackModels.length > 0) {
-      body.models = config.openRouterFallbackModels;
-    }
+    // Keep single-model request. Hidden fallback model swaps change style/persona.
+    // If you need fallback, pick explicit model in OPENROUTER_MODEL.
 
     const res = await fetch(config.openRouterUrl, {
       method: 'POST',

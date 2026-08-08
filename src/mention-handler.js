@@ -1,24 +1,44 @@
-import { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, ComponentType, ChannelType, PermissionFlagsBits } from 'discord.js';
-import { fetchWeather, getWeatherCodeInfo } from './utils/weather.js';
-import { condenseForVoice, synthesize } from './voice/tts.js';
-import { playInVoiceChannel, getMemberVoiceChannel } from './voice/player.js';
+import { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, ChannelType, PermissionFlagsBits } from 'discord.js';
+
 import { chatCompletion } from './ai/openrouter.js';
 import { buildAgentRoutingPrompt, buildJarvisPrompt, ACTION_RESPONSE_PROMPT } from './ai/prompts.js';
 import { ragPipeline } from './rag/pipeline.js';
-import { scrapeUrl } from './rag/scraper.js';
 import { getHistory, getContext, addMessage, buildContextInjection } from './utils/memory.js';
 import { trackInteraction, buildStyleInstruction } from './utils/user-prefs.js';
-import { setReminder, parseDuration, formatDuration, parseAbsoluteTime } from './utils/reminders.js';
 import { isOwner } from './utils/permissions.js';
 import { isBotAwake, sleep, wake } from './utils/wake-sleep.js';
 import { hasPendingLearn, addExplanation, completeLearning, startPendingLearn, buildLearnedKnowledge } from './utils/learned-patterns.js';
 import config from './config.js';
 import logger from './utils/logger.js';
-import { addWarning, getWarnings, clearWarnings } from './utils/warnings.js';
-import { getSetting, setSetting, removeSetting, getAllSettings } from './utils/server-settings.js';
-import { setupVoiceMaster, removeVoiceMaster, isVoiceMasterActive } from './utils/voicemaster.js';
-import { checkRateLimit } from './utils/rate-limit.js';
+import { checkRateLimit, releaseRateLimit } from './utils/rate-limit.js';
 import { recordMetric } from './utils/metrics.js';
+import { handleVoiceResponse } from './utils/voice-response.js';
+
+// Import extracted actions
+import {
+  execTimeout,
+  execBanKick,
+  execRole,
+  execNickname,
+  execPinMessage,
+  execUnpinMessage,
+  execWarn,
+  execWarnList,
+  execWarnClear,
+  execCreateChannel,
+  execDeleteChannel,
+  execSummarize,
+  execSummarizeChannel,
+  execVoiceCheck,
+  execVoiceMod,
+  execSetupVoiceMaster,
+  execReminder,
+  execSetConfig,
+  execGetConfig,
+  execPing,
+  execWeather,
+  execInvite
+} from './actions/index.js';
 
 // ─── Message Deduplication ─────────────────────────────────────────
 const processedMessages = new Map(); // messageId -> timestamp
@@ -41,11 +61,12 @@ function isDuplicate(messageId) {
 }
 
 // Add input validation utility
-function sanitizeInput(text, maxLength = 2000) {
+export function sanitizeInput(text, maxLength = 2000) {
   if (!text || typeof text !== 'string') return '';
   
   // Remove potential injection attempts (control chars)
   const sanitized = text
+    // eslint-disable-next-line no-control-regex -- intentional control-char stripping
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
     .trim();
   
@@ -53,82 +74,100 @@ function sanitizeInput(text, maxLength = 2000) {
 }
 
 export async function handleMention(message) {
-  const rateLimit = checkRateLimit(message.author.id);
-  if (!rateLimit.allowed) {
-    await message.reply(`⏱️ Slow down! Coba lagi dalam ${Math.ceil(rateLimit.resetIn / 1000)} detik.`);
-    return;
-  }
-
-  // Deduplicate — prevent processing same message multiple times
-  if (isDuplicate(message.id)) {
-    logger.warn(`⚠️ Duplikat pesan ${message.id}, skip.`);
-    return;
-  }
-
-  const client = message.client;
-  const botId = client.user.id;
-  const rawContent = sanitizeInput(
-    message.content.replace(new RegExp(`<@!?${botId}>`, 'g'), '').trim(),
-    2000
-  );
-
-  if (!rawContent) {
-    if (isBotAwake()) await message.reply('Hai! Ada yang bisa aku bantu? 🤖');
-    return;
-  }
-
-  // Handle manual learn trigger: belajar: or ajarkan:
-  const normalizedRaw = rawContent.toLowerCase();
-  if (normalizedRaw.startsWith('belajar:') || normalizedRaw.startsWith('ajarkan:')) {
-    const keyword = normalizedRaw.startsWith('belajar:') ? 'belajar:' : 'ajarkan:';
-    const originalQuery = rawContent.slice(normalizedRaw.indexOf(keyword) + keyword.length).trim();
-    if (originalQuery) {
-      startPendingLearn(message.channel.id, message.author.id, originalQuery);
-      await message.reply(`✍️ Sesi belajar dimulai untuk pesan: **"${originalQuery}"**\nJelasin artinya di bawah (ga perlu tag aku), lalu kirim **UPDATE**.`);
-      return;
-    }
-  }
-
-  // Check UPDATE trigger for self-learning
-  if (rawContent.toUpperCase() === 'UPDATE') {
-    return await handleUpdateLearn(message);
-  }
-
-  // If there's a pending learn session, capture explanation
-  const userId = message.author.id;
-  if (hasPendingLearn(message.channel.id, userId) && rawContent.toUpperCase() !== 'UPDATE') {
-    addExplanation(message.channel.id, userId, rawContent);
-    return; // Don't process as normal message, wait for UPDATE
-  }
-
-  // If sleeping, only owner can wake
-  if (!isBotAwake()) {
-    // Try to detect wake intent even while sleeping (owner only)
-    if (isOwner(userId) && /\b(bangun|wake\s*up|hidup|on|start|aktif|nyala)\b/i.test(rawContent)) {
-      wake();
-      await message.reply('🟢 Siap bertugas kembali, Boss!');
-      client.user.setActivity('🧠 Mention aku!', { type: 3 });
-      client.user.setStatus('online');
-      return;
-    }
-    return;
-  }
-
-  trackInteraction(userId, rawContent);
-  await message.channel.sendTyping();
-
+  let rateLimitToken = null;
   const totalStart = Date.now();
-  logger.info(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-  logger.info(`📩 Pesan dari ${message.author.username}: "${rawContent}"`);
-
   try {
-    const serverCtx = gatherServerContext(message);
+    // Include guildId so guild quotas apply to mention traffic too
+    const rateLimit = checkRateLimit(message.author.id, message.guild?.id ?? null);
+    if (!rateLimit.allowed) {
+      await message.reply(`⏱️ Slow down! Coba lagi dalam ${Math.ceil(rateLimit.resetIn / 1000)} detik.`);
+      return;
+    }
+    rateLimitToken = rateLimit.token;
+
+    // Deduplicate — prevent processing same message multiple times
+    if (isDuplicate(message.id)) {
+      logger.warn(`⚠️ Duplikat pesan ${message.id}, skip.`);
+      return;
+    }
+
+    const client = message.client;
+    const botId = client.user.id;
+    const rawContent = sanitizeInput(
+      message.content.replace(new RegExp(`<@!?${botId}>`, 'g'), '').trim(),
+      2000
+    );
+
+    if (!rawContent) {
+      if (isBotAwake()) await message.reply('Hai! Ada yang bisa aku bantu? 🤖');
+      return;
+    }
+
+    // Handle manual learn trigger: belajar: or ajarkan:
+    const normalizedRaw = rawContent.toLowerCase();
+    if (normalizedRaw.startsWith('belajar:') || normalizedRaw.startsWith('ajarkan:')) {
+      const keyword = normalizedRaw.startsWith('belajar:') ? 'belajar:' : 'ajarkan:';
+      const originalQuery = rawContent.slice(normalizedRaw.indexOf(keyword) + keyword.length).trim();
+      if (originalQuery) {
+        startPendingLearn(message.channel.id, message.author.id, originalQuery);
+        await message.reply(`✍️ Sesi belajar dimulai untuk pesan: **"${originalQuery}"**\nJelasin artinya di bawah (ga perlu tag aku), lalu kirim **UPDATE**.`);
+        return;
+      }
+    }
+
+    // Check UPDATE trigger for self-learning
+    if (rawContent.toUpperCase() === 'UPDATE') {
+      return await handleUpdateLearn(message);
+    }
+
+    // If there's a pending learn session, capture explanation
+    const userId = message.author.id;
+    if (hasPendingLearn(message.channel.id, userId) && rawContent.toUpperCase() !== 'UPDATE') {
+      addExplanation(message.channel.id, userId, rawContent);
+      return; // Don't process as normal message, wait for UPDATE
+    }
+
+    // If sleeping, only owner can wake
+    if (!isBotAwake()) {
+      // Try to detect wake intent even while sleeping (owner only)
+      if (isOwner(userId) && /\b(bangun|wake\s*up|hidup|on|start|aktif|nyala)\b/i.test(rawContent)) {
+        wake();
+        await message.reply('🟢 Siap bertugas kembali, Boss!');
+        client.user.setActivity('🧠 Mention aku!', { type: 3 });
+        client.user.setStatus('online');
+        return;
+      }
+      return;
+    }
+
+    trackInteraction(userId, rawContent);
+    await message.channel.sendTyping();
+
+    // totalStart declared at function entry for catch-block access
+    logger.info(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    logger.info(`📩 Pesan dari ${message.author.username}: "${rawContent}"`);
+
+    // Only build heavy server context if the user query suggests an action might need it
+    const needsHeavyContext = ACTION_HINT.test(rawContent);
+    const serverCtx = gatherServerContext(message, { includeHeavy: needsHeavyContext });
 
     // Step 1: local fast path for safe, obvious intents; AI only for ambiguity/actions.
     logger.info(`[Step 1] 🧠 Reasoning — menganalisis pesan...`);
     const reasonStart = Date.now();
     const { prompt: learnedKnowledge, hasMatch } = await buildLearnedKnowledge(rawContent);
     const plan = (!hasMatch && fastRoute(rawContent)) || await analyzeAndPlan(rawContent, message, serverCtx, learnedKnowledge);
+
+    // Guard: if the classifier picked ask_clarification but the message has no
+    // moderation/utility action keyword, the user is just chatting. Downgrade to
+    // chat so we get a natural in-character reply instead of the rigid "belum
+    // paham + UPDATE" clarification prompt. Genuine action-command ambiguity
+    // (e.g. "ban him" with no target) still keeps the clarification + learn flow.
+    if (plan.action === 'ask_clarification' && !ACTION_HINT.test(rawContent)) {
+      logger.info(`[Step 1] 🔁 ask_clarification -> chat (no action keyword, looks like chat)`);
+      plan.action = 'chat';
+      plan.response_style = plan.response_style || 'casual';
+    }
+
     const reasonMs = Date.now() - reasonStart;
     logger.info(`[Step 1] ✅ Selesai dalam ${(reasonMs / 1000).toFixed(1)}s → Action: ${plan.action} | Thought: ${plan.thought}`);
 
@@ -161,7 +200,7 @@ export async function handleMention(message) {
 
     logger.info(`[Step 2] ⚡ Executing action: ${plan.action}...`);
     const actionStart = Date.now();
-    const result = await executeAction(plan, message, serverCtx);
+    const result = await executeAction(plan, message);
     const actionMs = Date.now() - actionStart;
     logger.info(`[Step 2] ✅ Action selesai dalam ${(actionMs / 1000).toFixed(1)}s → success: ${result.success}`);
 
@@ -190,15 +229,19 @@ export async function handleMention(message) {
   } catch (err) {
     const totalMs = Date.now() - totalStart;
     recordMetric('request', { success: false, latency: totalMs });
-    logger.error(`❌ Mention handler error setelah ${(totalMs / 1000).toFixed(1)}s: ${err.message}`);
+    logger.error(`❌ Mention handler error: ${err.message}`);
     logger.info(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     await message.reply('Aduh, ada yang error nih. Coba lagi ya.').catch(() => { });
+  } finally {
+    if (rateLimitToken) {
+      releaseRateLimit(rateLimitToken);
+    }
   }
 }
 
 // ─── Server Context ────────────────────────────────────────────────
 
-function gatherServerContext(message) {
+function gatherServerContext(message, options = {}) {
   const guild = message.guild;
   if (!guild) return 'Konteks: Pesan di DM (bukan server)';
 
@@ -212,57 +255,54 @@ function gatherServerContext(message) {
     lines.push('Mentioned users: ' + mentioned.map(u => `${u.username} (<@${u.id}>)`).join(', '));
   }
 
-  // Voice state
-  const voiceChannels = guild.channels.cache.filter(ch => ch.type === ChannelType.GuildVoice || ch.type === ChannelType.GuildStageVoice);
-  const voiceInfo = [];
-  for (const [, ch] of voiceChannels) {
-    if (ch.members.size === 0) continue;
-    const members = ch.members.map((m) => {
-      const s = [];
-      if (m.voice.selfMute || m.voice.serverMute) s.push('muted');
-      if (m.voice.selfDeaf || m.voice.serverDeaf) s.push('deaf');
-      if (m.voice.streaming) s.push('streaming');
-      return `${m.displayName}(<@${m.id}>) [${s.join(',') || 'normal'}]`;
-    }).join(', ');
-    voiceInfo.push(`VC "${ch.name}": ${members}`);
-  }
-  if (voiceInfo.length > 0) lines.push('Voice channels:\n' + voiceInfo.join('\n'));
-  else lines.push('Voice channels: semua kosong');
+  if (options.includeHeavy) {
+    // Voice state
+    const voiceChannels = guild.channels.cache.filter(ch => ch.type === ChannelType.GuildVoice || ch.type === ChannelType.GuildStageVoice);
+    const voiceInfo = [];
+    for (const [, ch] of voiceChannels) {
+      if (ch.members.size === 0) continue;
+      const members = ch.members.map((m) => {
+        const s = [];
+        if (m.voice.selfMute || m.voice.serverMute) s.push('muted');
+        if (m.voice.selfDeaf || m.voice.serverDeaf) s.push('deaf');
+        if (m.voice.streaming) s.push('streaming');
+        return `${m.displayName}(<@${m.id}>) [${s.join(',') || 'normal'}]`;
+      }).join(', ');
+      voiceInfo.push(`VC "${ch.name}": ${members}`);
+    }
+    if (voiceInfo.length > 0) lines.push('Voice channels:\n' + voiceInfo.join('\n'));
+    else lines.push('Voice channels: semua kosong');
 
-  // Top roles (max 15)
-  const roles = guild.roles.cache
-    .filter(r => r.name !== '@everyone')
-    .sort((a, b) => b.position - a.position)
-    .first(15)
-    .map(r => r.name);
-  if (roles.length > 0) lines.push('Roles tersedia: ' + roles.join(', '));
+    // Top roles (max 15)
+    const roles = guild.roles.cache
+      .filter(r => r.name !== '@everyone')
+      .sort((a, b) => b.position - a.position)
+      .first(15)
+      .map(r => r.name);
+    if (roles.length > 0) lines.push('Roles tersedia: ' + roles.join(', '));
 
-  // User permissions
-  const perms = [];
-  const mp = message.member?.permissions;
-  if (mp) {
-    if (mp.has(PermissionFlagsBits.MuteMembers)) perms.push('MuteMembers');
-    if (mp.has(PermissionFlagsBits.DeafenMembers)) perms.push('DeafenMembers');
-    if (mp.has(PermissionFlagsBits.MoveMembers)) perms.push('MoveMembers');
-    if (mp.has(PermissionFlagsBits.ManageRoles)) perms.push('ManageRoles');
-    if (mp.has(PermissionFlagsBits.ManageNicknames)) perms.push('ManageNicknames');
-    if (mp.has(PermissionFlagsBits.ModerateMembers)) perms.push('ModerateMembers');
-    if (mp.has(PermissionFlagsBits.ManageMessages)) perms.push('ManageMessages');
-    if (mp.has(PermissionFlagsBits.ReadMessageHistory)) perms.push('ReadMessageHistory');
+    // User permissions
+    const perms = [];
+    const mp = message.member?.permissions;
+    if (mp) {
+      if (mp.has(PermissionFlagsBits.MuteMembers)) perms.push('MuteMembers');
+      if (mp.has(PermissionFlagsBits.DeafenMembers)) perms.push('DeafenMembers');
+      if (mp.has(PermissionFlagsBits.MoveMembers)) perms.push('MoveMembers');
+      if (mp.has(PermissionFlagsBits.ManageRoles)) perms.push('ManageRoles');
+      if (mp.has(PermissionFlagsBits.ManageNicknames)) perms.push('ManageNicknames');
+      if (mp.has(PermissionFlagsBits.ModerateMembers)) perms.push('ModerateMembers');
+      if (mp.has(PermissionFlagsBits.ManageMessages)) perms.push('ManageMessages');
+      if (mp.has(PermissionFlagsBits.ReadMessageHistory)) perms.push('ReadMessageHistory');
+    }
+    lines.push('User permissions: ' + (perms.length > 0 ? perms.join(', ') : 'basic'));
   }
-  lines.push('User permissions: ' + (perms.length > 0 ? perms.join(', ') : 'basic'));
 
   return lines.join('\n');
 }
 
 // ─── AI Reasoning ──────────────────────────────────────────────────
 
-async function analyzeAndPlan(rawContent, message, serverCtx, learnedKnowledgePrompt) {
-  let learnedKnowledge = learnedKnowledgePrompt;
-  if (!learnedKnowledge) {
-    const res = await buildLearnedKnowledge(rawContent);
-    learnedKnowledge = res.prompt;
-  }
+async function analyzeAndPlan(rawContent, message, serverCtx, learnedKnowledge) {
   const systemPrompt = buildAgentRoutingPrompt(serverCtx, learnedKnowledge);
 
   try {
@@ -270,7 +310,6 @@ async function analyzeAndPlan(rawContent, message, serverCtx, learnedKnowledgePr
       [{ role: 'system', content: systemPrompt }, { role: 'user', content: rawContent }],
       {
         task: 'routing',
-        maxTokens: 220,
         temperature: 0,
         jsonSchema: ROUTE_SCHEMA,
       }
@@ -302,46 +341,42 @@ const ROUTE_SCHEMA = {
         'reminder', 'summarize', 'announce_ask', 'warn', 'warn_list',
         'warn_clear', 'pin_message', 'unpin_message', 'summarize_channel',
         'create_channel', 'delete_channel', 'setup_voicemaster', 'set_config',
-        'get_config', 'bot_sleep', 'bot_wake', 'ask_clarification',
-        'ping', 'weather', 'invite',
-      ],
+        'get_config', 'bot_sleep', 'bot_wake', 'ask_clarification'
+      ]
     },
+    thought: { type: 'string' },
     params: {
       type: 'object',
       properties: {
         target_id: { type: 'string' },
         target_name: { type: 'string' },
-        duration: { type: 'string' },
-        schedule: { type: 'string' },
-        delivery: { type: 'string', enum: ['text', 'voice', 'both'] },
         role_name: { type: 'string' },
-        new_nick: { type: 'string' },
+        duration: { type: 'string' },
         reason: { type: 'string' },
         text: { type: 'string' },
+        schedule: { type: 'string' },
+        delivery: { type: 'string', enum: ['text', 'voice', 'both'] },
         url: { type: 'string' },
-        to_lang: { type: 'string' },
-        code_text: { type: 'string' },
-        channel_id: { type: 'string' },
-        message_id: { type: 'string' },
         count: { type: 'integer' },
-        name: { type: 'string' },
-        type: { type: 'string', enum: ['text', 'voice'] },
-        category: { type: 'string' },
-        action: { type: 'string', enum: ['enable', 'disable'] },
+        message_id: { type: 'string' },
+        channel_name: { type: 'string' },
+        channel_type: { type: 'string', enum: ['text', 'voice'] },
+        action: { type: 'string' },
         hub_channel_id: { type: 'string' },
         setting: { type: 'string' },
-        question: { type: 'string' },
-        location: { type: 'string' },
-      },
+        channel_id: { type: 'string' },
+        nickname: { type: 'string' }
+      }
     },
-    response_style: { type: 'string', enum: ['casual', 'informative', 'mentor', 'playful'] },
+    response_style: { type: 'string', enum: ['casual', 'informative', 'mentor', 'playful'] }
   },
-  required: ['action', 'params', 'response_style'],
+  required: ['action', 'thought']
 };
+
+// ─── Fast Router ───────────────────────────────────────────────────
 
 const ACTION_HINT = /\b(mute|unmute|deafen|undeafen|disconnect|role|timeout|ban|kick|warn|pin|unpin|remind|ingatkan|ringkas|summary|summarize|announce|pengumuman|channel|voicemaster|config|setting|tidur|bangun|nickname|nick|ping|weather|cuaca|invite|undang)\b/i;
 const CODE_HINT = /```|\b(kode|coding|javascript|typescript|node\.?js|python|java|php|golang|rust|html|css|sql|bug|error|crash|not working|ga jalan|stack trace)\b/i;
-const KNOWLEDGE_HINT = /^(apa|apakah|siapa|kenapa|mengapa|bagaimana|jelaskan|terangkan|what|who|why|how|explain)\b/i;
 const CHAT_HINT = /^(hai|halo|hello|hi|hey|pagi|siang|sore|malam|makasih|terima kasih|thanks|thank you|oke|ok|baik|siap|mantap)[!. ]*$/i;
 
 function fastRoute(rawContent) {
@@ -368,23 +403,18 @@ function fastRoute(rawContent) {
   if (CODE_HINT.test(text)) {
     return { thought: 'local fast path', action: 'code_help', params: {}, response_style: 'mentor', rawQuery: rawContent };
   }
-  if (KNOWLEDGE_HINT.test(text) || text.endsWith('?')) {
-    return { thought: 'local fast path', action: 'knowledge', params: {}, response_style: 'informative', rawQuery: rawContent };
-  }
   return null;
 }
 
-// ─── Action Executor ───────────────────────────────────────────────
+// ─── Action Dispatcher ─────────────────────────────────────────────
 
-async function executeAction(plan, message, serverCtx) {
+async function executeAction(plan, message) {
   const { action, params } = plan;
-  const guild = message.guild;
 
   switch (action) {
     case 'chat': return { success: true, type: 'chat' };
     case 'knowledge': return { success: true, type: 'knowledge' };
 
-    // New utility handlers
     case 'ping': return await execPing(message);
     case 'weather': return await execWeather(message, params);
     case 'invite': return await execInvite(message);
@@ -431,961 +461,53 @@ async function executeAction(plan, message, serverCtx) {
       message.client.user.setStatus('online');
       return { success: true, type: 'bot_wake' };
 
-    case 'ask_clarification':
+    case 'ask_clarification': {
       startPendingLearn(message.channel.id, message.author.id, plan.rawQuery);
-      const q = params.question || 'Hmm, bisa jelasin lebih detail? Gue belum paham maksudnya.';
-      await message.reply(q + '\n\n💡 *Jelasin aja langsung (ga perlu tag aku), lalu kirim* **UPDATE** *biar gue belajar.*');
+      const q = params.question || 'Tunggu, siapa yang kamu maksud? Tag orangnya dulu dong 😤';
+      await message.reply(q + '\n\n💡 *Kasih detailnya (ga perlu tag aku), terus kirim* **UPDATE** *biar gue ingat buat lain waktu.*');
       return { success: true, type: 'clarification', replied: true };
+    }
 
     default: return { success: true, type: 'chat' };
   }
 }
 
-async function execPing(message) {
-  const msg = await message.reply('🏓 Pinging...');
-  const discordPing = message.client.ws.ping;
-
-  let googlePing = -1;
-  try {
-    const gStart = Date.now();
-    await fetch('https://www.google.com', { method: 'HEAD' });
-    googlePing = Date.now() - gStart;
-  } catch (err) {
-    // ignore
-  }
-
-  const embed = new EmbedBuilder()
-    .setColor('#00ffcc')
-    .setTitle('🏓 Pong!')
-    .addFields(
-      { name: '🌐 Discord Gateway Latency', value: `${discordPing}ms`, inline: true },
-      { name: '🔍 Google HTTP Latency', value: googlePing !== -1 ? `${googlePing}ms` : 'Error', inline: true }
-    )
-    .setFooter({ text: `Total round-trip time: ${Date.now() - message.createdTimestamp}ms` })
-    .setTimestamp();
-
-  await msg.edit({ content: null, embeds: [embed] });
-  return { success: true, type: 'ping', replied: true };
-}
-
-async function execWeather(message, params) {
-  const location = params.location || 'Jakarta';
-  const msg = await message.reply('🔍 Memeriksa cuaca...');
-
-  const weatherData = await fetchWeather(location);
-  if (!weatherData) {
-    const errorEmbed = new EmbedBuilder()
-      .setColor('#ff4757')
-      .setTitle('❌ Lokasi Tidak Ditemukan')
-      .setDescription(`Maaf, tidak bisa menemukan informasi cuaca untuk lokasi **"${location}"**.`);
-    await msg.edit({ content: null, embeds: [errorEmbed] });
-    return { success: true, type: 'weather', replied: true };
-  }
-
-  const info = getWeatherCodeInfo(weatherData.current.weather_code);
-  const embed = new EmbedBuilder()
-    .setColor('#37b24d')
-    .setTitle(`${info.emoji} Cuaca Realtime di ${weatherData.name}, ${weatherData.country}`)
-    .addFields(
-      { name: '🌡️ Suhu Saat Ini', value: `${weatherData.current.temperature_2m}°C (Terasa seperti ${weatherData.current.apparent_temperature}°C)`, inline: true },
-      { name: '💧 Kelembapan', value: `${weatherData.current.relative_humidity_2m}%`, inline: true },
-      { name: '💨 Kecepatan Angin', value: `${weatherData.current.wind_speed_10m} km/h`, inline: true },
-      { name: '📊 Kondisi', value: info.label, inline: true },
-      { name: '📍 Koordinat', value: `${weatherData.latitude.toFixed(4)}, ${weatherData.longitude.toFixed(4)}`, inline: true },
-      { name: '🌍 Wilayah', value: weatherData.admin1 || '-', inline: true }
-    )
-    .setTimestamp();
-
-  await msg.edit({ content: null, embeds: [embed] });
-  return { success: true, type: 'weather', replied: true };
-}
-
-async function execInvite(message) {
-  const clientId = message.client.user.id;
-  const inviteUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&permissions=3230720&scope=bot%20applications.commands`;
-
-  const embed = new EmbedBuilder()
-    .setColor('#5865F2')
-    .setTitle('🤖 Undang Bot Ini Ke Server Kamu!')
-    .setDescription('Klik tombol di bawah ini untuk mengundang bot ini ke server lain dengan hak akses Administrator dan Slash Commands.');
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setLabel('Undang Bot (Invite Link)')
-      .setStyle(ButtonStyle.Link)
-      .setURL(inviteUrl)
-  );
-
-  await message.reply({ embeds: [embed], components: [row] });
-  return { success: true, type: 'invite', replied: true };
-}
-
-// ─── Voice Check ───────────────────────────────────────────────────
-
-async function execVoiceCheck(message) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-
-  const voiceChannels = guild.channels.cache.filter(ch => ch.type === ChannelType.GuildVoice || ch.type === ChannelType.GuildStageVoice);
-  const data = [];
-  for (const [, ch] of voiceChannels) {
-    if (ch.members.size === 0) continue;
-    const members = [];
-    for (const [, m] of ch.members) {
-      const s = [];
-      if (m.voice.selfMute || m.voice.serverMute) s.push('muted');
-      if (m.voice.selfDeaf || m.voice.serverDeaf) s.push('deaf');
-      if (m.voice.streaming) s.push('streaming');
-      if (m.voice.selfVideo) s.push('camera');
-      members.push({ name: m.displayName, status: s.length > 0 ? s : ['normal'] });
-    }
-    data.push({ channel: ch.name, members });
-  }
-  return { success: true, type: 'voice_check', data };
-}
-
-// ─── Voice Moderation ──────────────────────────────────────────────
-
-async function execVoiceMod(message, params, action) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-
-  const permMap = { mute: PermissionFlagsBits.MuteMembers, unmute: PermissionFlagsBits.MuteMembers, deafen: PermissionFlagsBits.DeafenMembers, undeafen: PermissionFlagsBits.DeafenMembers, disconnect: PermissionFlagsBits.MoveMembers };
-  if (!isOwner(message.author.id) && !message.member.permissions.has(permMap[action])) {
-    return { success: false, error: 'Tidak punya permission untuk voice moderation' };
-  }
-
-  const targetId = extractUserId(params.target_id);
-  if (!targetId) return { success: false, error: 'Target user tidak ditemukan' };
-
-  const member = await guild.members.fetch(targetId).catch(() => null);
-  if (!member) return { success: false, error: 'User tidak ada di server' };
-  if (!member.voice.channel) return { success: false, error: `${member.displayName} tidak di voice channel` };
-
-  try {
-    const name = member.displayName;
-    if (action === 'mute') { await member.voice.setMute(true); return { success: true, type: 'voice_mod', action, targetName: name }; }
-    if (action === 'unmute') { await member.voice.setMute(false); return { success: true, type: 'voice_mod', action, targetName: name }; }
-    if (action === 'deafen') { await member.voice.setDeaf(true); return { success: true, type: 'voice_mod', action, targetName: name }; }
-    if (action === 'undeafen') { await member.voice.setDeaf(false); return { success: true, type: 'voice_mod', action, targetName: name }; }
-    if (action === 'disconnect') { await member.voice.disconnect(); return { success: true, type: 'voice_mod', action, targetName: name }; }
-  } catch (err) { return { success: false, error: err.message }; }
-}
-
-// ─── Role Management ───────────────────────────────────────────────
-
-async function execRole(message, params, action) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-  if (!isOwner(message.author.id) && !message.member.permissions.has(PermissionFlagsBits.ManageRoles)) {
-    return { success: false, error: 'Tidak punya permission ManageRoles' };
-  }
-
-  const targetId = extractUserId(params.target_id);
-  if (!targetId) return { success: false, error: 'Target tidak ditemukan' };
-
-  const member = await guild.members.fetch(targetId).catch(() => null);
-  if (!member) return { success: false, error: 'User tidak ada di server' };
-
-  const roleName = params.role_name;
-  if (!roleName) return { success: false, error: 'Nama role tidak disebutkan' };
-
-  const role = guild.roles.cache.find(r => r.name.toLowerCase() === roleName.toLowerCase());
-  if (!role) return { success: false, error: `Role "${roleName}" tidak ada` };
-
-  const botMember = await guild.members.fetchMe();
-  if (role.position >= botMember.roles.highest.position) return { success: false, error: `Role ${role.name} terlalu tinggi` };
-
-  try {
-    if (action === 'add') { await member.roles.add(role); } else { await member.roles.remove(role); }
-    return { success: true, type: 'role', action, targetName: member.displayName, roleName: role.name };
-  } catch (err) { return { success: false, error: err.message }; }
-}
-
-// ─── Shared: Resolve target member (by ID or nickname) ─────────────
-
-async function resolveTargetMember(message, params) {
-  const guild = message.guild;
-  const targetId = extractUserId(params.target_id);
-
-  // If we have a direct user ID/mention, use it
-  if (targetId) {
-    const member = await guild.members.fetch(targetId).catch(() => null);
-    if (member) return { member };
-    return { error: 'User tidak ada di server.' };
-  }
-
-  // If we have a nickname/name, search for matching members
-  const targetName = params.target_name;
-  if (!targetName) return { error: 'Target user tidak ditemukan. Tolong tag (@) user yang dimaksud.' };
-
-  // Search members by displayName or username
-  await guild.members.fetch(); // Ensure cache is populated
-  const matches = guild.members.cache.filter(m =>
-    m.displayName.toLowerCase().includes(targetName.toLowerCase()) ||
-    m.user.username.toLowerCase().includes(targetName.toLowerCase())
-  );
-
-  if (matches.size === 0) {
-    return { error: `Tidak ada member dengan nama "${targetName}".` };
-  }
-
-  if (matches.size === 1) {
-    return { member: matches.first() };
-  }
-
-  // Multiple matches — ask user to tag the right one
-  const memberList = matches.first(10).map(m => `• **${m.displayName}** (<@${m.id}>)`).join('\n');
-  const askReply = await message.reply(
-    `⚠️ Ada **${matches.size}** member dengan nama mirip "${targetName}":\n\n${memberList}\n\n` +
-    `Tolong **tag (@)** user yang kamu maksud dalam 1 menit.`
-  );
-
-  try {
-    const collected = await message.channel.awaitMessages({
-      filter: (m) => m.author.id === message.author.id && m.mentions.users.size > 0,
-      max: 1,
-      time: 60_000,
-      errors: ['time'],
-    });
-
-    const response = collected.first();
-    const mentionedUser = response.mentions.users.filter(u => u.id !== message.client.user.id).first();
-    if (!mentionedUser) {
-      await askReply.edit('⏰ Tidak ada user yang di-tag. Perintah dibatalkan.').catch(() => {});
-      return { error: null, cancelled: true };
-    }
-
-    await askReply.delete().catch(() => {});
-    const member = await guild.members.fetch(mentionedUser.id).catch(() => null);
-    if (!member) return { error: 'User yang di-tag tidak ada di server.' };
-    return { member };
-  } catch {
-    await askReply.edit('⏰ Waktu habis (1 menit). Perintah dibatalkan.').catch(() => {});
-    return { error: null, cancelled: true };
-  }
-}
-
-// ─── Timeout ───────────────────────────────────────────────────────
-
-async function execTimeout(message, params) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-  if (!isOwner(message.author.id) && !message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) {
-    return { success: false, error: 'Tidak punya permission ModerateMembers' };
-  }
-
-  // Resolve target (supports nickname search)
-  const resolved = await resolveTargetMember(message, params);
-  if (resolved.cancelled) return { success: true, type: 'cancelled', replied: true };
-  if (resolved.error) return { success: false, error: resolved.error };
-  const member = resolved.member;
-
-  // If duration is missing or empty, ask the user
-  let dur = 0;
-  if (!params.duration || params.duration.trim() === '') {
-    const askReply = await message.reply(
-      `⏱️ Mau timeout **${member.displayName}** berapa lama?\n` +
-      `Contoh: "5 menit", "1 jam", "30 detik"\n\n` +
-      `_Reply dalam 1 menit, atau perintah dibatalkan._`
-    );
-
-    try {
-      const collected = await message.channel.awaitMessages({
-        filter: (m) => m.author.id === message.author.id,
-        max: 1,
-        time: 60_000,
-        errors: ['time'],
-      });
-
-      const response = collected.first();
-      dur = parseDuration(response.content.trim());
-      await askReply.delete().catch(() => {});
-    } catch {
-      await askReply.edit('⏰ Waktu habis (1 menit). Timeout dibatalkan.').catch(() => {});
-      return { success: true, type: 'cancelled', replied: true };
-    }
-  } else {
-    dur = parseDuration(params.duration);
-  }
-
-  if (dur <= 0 || dur > 28 * 24 * 60 * 60 * 1000) return { success: false, error: 'Durasi tidak valid' };
-
-  try {
-    await member.timeout(dur);
-    return { success: true, type: 'timeout', targetName: member.displayName, duration: formatDuration(dur) };
-  } catch (err) {
-    if (err.code === 50013) {
-      return { success: false, error: `Tidak bisa timeout ${member.displayName}. Role bot harus lebih tinggi.` };
-    }
-    return { success: false, error: err.message };
-  }
-}
-
-// ─── Ban / Kick ────────────────────────────────────────────────────
-
-async function execBanKick(message, params, action) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-
-  const permNeeded = action === 'ban' ? PermissionFlagsBits.BanMembers : PermissionFlagsBits.KickMembers;
-  if (!isOwner(message.author.id) && !message.member.permissions.has(permNeeded)) {
-    return { success: false, error: `Tidak punya permission ${action === 'ban' ? 'BanMembers' : 'KickMembers'}` };
-  }
-
-  // Resolve target (supports nickname search with interactive disambiguation)
-  const resolved = await resolveTargetMember(message, params);
-  if (resolved.cancelled) return { success: true, type: 'cancelled', replied: true };
-  if (resolved.error) return { success: false, error: resolved.error };
-  const member = resolved.member;
-
-  // Can't ban/kick server owner
-  if (member.id === guild.ownerId) {
-    return { success: false, error: `${member.displayName} adalah pemilik server, tidak bisa di-${action}.` };
-  }
-
-  // Check bot role hierarchy
-  const botMember = await guild.members.fetchMe();
-  if (member.roles.highest.position >= botMember.roles.highest.position) {
-    return { success: false, error: `Role ${member.displayName} terlalu tinggi. Bot tidak bisa ${action}.` };
-  }
-
-  const reason = params.reason || 'Tidak disebutkan';
-
-  try {
-    // Confirmation UI
-    const confirmId = `confirm_${action}_${member.id}_${Date.now()}`;
-    const cancelId = `cancel_${action}_${member.id}_${Date.now()}`;
-
-    const embed = new EmbedBuilder()
-      .setColor('#ff0000')
-      .setTitle(`⚠️ Konfirmasi ${action.toUpperCase()}`)
-      .setDescription(`Apakah kamu yakin ingin me-${action} **${member.displayName}**?\n**Alasan:** ${reason}`);
-
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(confirmId).setLabel('✅ Yakin').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId(cancelId).setLabel('❌ Batal').setStyle(ButtonStyle.Secondary)
-    );
-
-    const reply = await message.reply({ embeds: [embed], components: [row] });
-
-    try {
-      const i = await reply.awaitMessageComponent({
-        filter: (interaction) => interaction.user.id === message.author.id,
-        time: 30000
-      });
-      await i.deferUpdate();
-
-      if (i.customId === confirmId) {
-        if (action === 'ban') {
-          await member.ban({ reason });
-        } else {
-          await member.kick(reason);
-        }
-        await reply.edit({ content: `✅ Berhasil me-${action} ${member.displayName}.`, embeds: [], components: [] });
-      } else {
-        await reply.edit({ content: `❌ Aksi ${action} dibatalkan.`, embeds: [], components: [] });
-      }
-      return { success: true, type: 'cancelled', replied: true };
-    } catch {
-      await reply.edit({ content: `⏰ Waktu konfirmasi habis. Aksi ${action} dibatalkan.`, embeds: [], components: [] });
-      return { success: true, type: 'cancelled', replied: true };
-    }
-    // Return handled above in the confirmation logic
-
-  } catch (err) {
-    if (err.code === 50013) {
-      return { success: false, error: `Bot tidak punya permission untuk ${action} ${member.displayName}.` };
-    }
-    return { success: false, error: err.message };
-  }
-}
-
-// ─── Nickname ──────────────────────────────────────────────────────
-
-async function execNickname(message, params) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-  if (!isOwner(message.author.id) && !message.member.permissions.has(PermissionFlagsBits.ManageNicknames)) {
-    return { success: false, error: 'Tidak punya permission ManageNicknames' };
-  }
-
-  const targetId = extractUserId(params.target_id);
-  if (!targetId) return { success: false, error: 'Target tidak ditemukan' };
-
-  const member = await guild.members.fetch(targetId).catch(() => null);
-  if (!member) return { success: false, error: 'User tidak ada' };
-
-  // Check if target is server owner — nobody can change owner's nick via bot
-  if (member.id === guild.ownerId) {
-    return { success: false, error: `${member.displayName} adalah pemilik server, nickname-nya tidak bisa diubah oleh bot.` };
-  }
-
-  // Check bot role hierarchy — bot's highest role must be above target's highest role
-  const botMember = await guild.members.fetchMe();
-  if (member.roles.highest.position >= botMember.roles.highest.position) {
-    return { success: false, error: `Role ${member.displayName} sama atau lebih tinggi dari role bot. Bot tidak bisa mengubah nickname-nya.` };
-  }
-
-  const nick = params.new_nick;
-  if (!nick) return { success: false, error: 'Nickname baru tidak disebutkan' };
-
-  try {
-    const old = member.displayName;
-    await member.setNickname(nick);
-    return { success: true, type: 'nickname', oldName: old, newName: nick };
-  } catch (err) {
-    // Provide a human-readable error
-    if (err.code === 50013) {
-      return { success: false, error: `Bot tidak punya permission untuk mengubah nickname ${member.displayName}. Pastikan role bot lebih tinggi.` };
-    }
-    return { success: false, error: err.message };
-  }
-}
-
-// ─── Reminder ──────────────────────────────────────────────────────
-
-async function execReminder(message, params) {
-  const delivery = params.delivery || 'text';
-  const targetId = message.author.id; // Enforce user can only make reminder for themselves
-  const guildId = message.guild?.id;
-  if (!guildId) return { success: false, error: 'Fitur ini hanya bisa digunakan di server.' };
-
-  let triggerAt = 0;
-  let durationText = '';
-
-  if (params.schedule && params.schedule.trim() !== '') {
-    const time = parseAbsoluteTime(params.schedule, config.timezone || 'Asia/Bangkok');
-    if (!time) return { success: false, error: 'Format waktu absolut tidak dipahami (contoh: "jam 3 sore", "besok jam 7 pagi", "pukul 20.30")' };
-    triggerAt = time;
-    const remainingMs = triggerAt - Date.now();
-    if (remainingMs <= 0) {
-      return { success: false, error: 'Waktu tersebut sudah terlewat.' };
-    }
-    const targetTz = config.timezone || 'Asia/Bangkok';
-    const tzLabel = targetTz.includes('Jakarta') || targetTz.includes('Bangkok') ? 'WIB' : 
-                    targetTz.includes('Makassar') || targetTz.includes('Kuala_Lumpur') || targetTz.includes('Singapore') ? 'WITA' : 
-                    targetTz.includes('Jayapura') ? 'WIT' : targetTz.split('/')[1]?.replace(/_/g, ' ') || 'Local Time';
-
-    durationText = `pada pukul ${new Date(triggerAt).toLocaleString('id-ID', { timeZone: targetTz, hour: '2-digit', minute: '2-digit' }).replace(/\./g, ':')} ${tzLabel}`;
-  } else {
-    const dur = parseDuration(params.duration || '');
-    if (dur <= 0) return { success: false, error: 'Durasi tidak jelas (contoh: "10 menit", "1 jam")' };
-    if (dur > 24 * 60 * 60 * 1000) return { success: false, error: 'Maksimal 24 jam' };
-    triggerAt = Date.now() + dur;
-    durationText = `dalam ${formatDuration(dur)}`;
-  }
-
-  const text = params.text || 'Reminder!';
-  const result = setReminder({
-    guildId,
-    userId: targetId,
-    fallbackChannelId: message.channel.id,
-    text,
-    delivery,
-    triggerAt
-  });
-
-  return { success: true, type: 'reminder', text, duration: durationText, delivery };
-}
-
-// ─── Summarize ─────────────────────────────────────────────────────
-
-async function execSummarize(message, params, plan) {
-  const url = params.url;
-  const text = params.text || plan.rawQuery;
-
-  await message.channel.sendTyping();
-
-  if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
-    try {
-      const content = await scrapeUrl(url);
-      if (!content) return { success: false, error: 'Gagal ambil konten dari URL' };
-      const summary = await chatCompletion([
-        { role: 'system', content: 'Ringkas konten berikut dalam 3-5 poin utama. Plain text, bullet points.' },
-        { role: 'user', content: `Ringkas:\n\n${content.slice(0, 6000)}` },
-      ]);
-      await message.reply(`📋 **Ringkasan:**\n\n${summary.slice(0, 1900)}`);
-      return { success: true, type: 'summarize', replied: true };
-    } catch (err) { return { success: false, error: err.message }; }
-  }
-
-  if (text) {
-    try {
-      const summary = await chatCompletion([
-        { role: 'system', content: 'Ringkas teks berikut secara singkat dan jelas. Plain text.' },
-        { role: 'user', content: `Ringkas:\n\n${text.slice(0, 6000)}` },
-      ]);
-      await message.reply(`📋 **Ringkasan:**\n\n${summary.slice(0, 1900)}`);
-      return { success: true, type: 'summarize', replied: true };
-    } catch (err) { return { success: false, error: err.message }; }
-  }
-
-  return { success: false, error: 'Tidak ada teks/URL untuk diringkas' };
-}
-
-// ─── Pin Message ───────────────────────────────────────────────────
-
-async function execPinMessage(message, params) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-
-  // Check bot permissions
-  const botPerms = message.channel.permissionsFor(guild.members.me);
-  if (!botPerms || !botPerms.has(PermissionFlagsBits.ManageMessages)) {
-    return { success: false, error: 'Bot tidak punya permission ManageMessages di channel ini. Perlu permission tersebut untuk pin pesan.' };
-  }
-
-  // Check user permissions
-  if (!isOwner(message.author.id) && !message.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
-    return { success: false, error: 'Kamu tidak punya permission ManageMessages untuk pin pesan.' };
-  }
-
-  let targetMessage = null;
-  const msgId = params.message_id;
-
-  // Priority 1: If the user's message is a reply to another message, pin that
-  if (message.reference && message.reference.messageId) {
-    try {
-      targetMessage = await message.channel.messages.fetch(message.reference.messageId);
-    } catch {
-      return { success: false, error: 'Gagal mengambil pesan yang di-reply.' };
-    }
-  }
-  // Priority 2: If a specific message ID is given
-  else if (msgId && msgId !== 'latest' && msgId !== 'reply' && /^\d+$/.test(msgId)) {
-    try {
-      targetMessage = await message.channel.messages.fetch(msgId);
-    } catch {
-      return { success: false, error: `Pesan dengan ID ${msgId} tidak ditemukan di channel ini.` };
-    }
-  }
-  // Priority 3: Get the latest non-bot message before the command
-  else {
-    try {
-      const messages = await message.channel.messages.fetch({ limit: 5, before: message.id });
-      targetMessage = messages.filter(m => !m.author.bot).first();
-      if (!targetMessage) {
-        targetMessage = messages.first();
-      }
-    } catch {
-      return { success: false, error: 'Gagal mengambil pesan terakhir.' };
-    }
-  }
-
-  if (!targetMessage) return { success: false, error: 'Tidak ada pesan yang bisa di-pin.' };
-
-  try {
-    if (targetMessage.pinned) {
-      return { success: false, error: 'Pesan tersebut sudah di-pin sebelumnya.' };
-    }
-    await targetMessage.pin();
-    return {
-      success: true,
-      type: 'pin_message',
-      replied: true,
-      messagePreview: targetMessage.content?.slice(0, 80) || '(embed/attachment)',
-      author: targetMessage.author.username,
-    };
-  } catch (err) {
-    if (err.code === 50013) {
-      return { success: false, error: 'Bot tidak punya permission untuk pin pesan di channel ini.' };
-    }
-    return { success: false, error: err.message };
-  }
-}
-
-// ─── Unpin Message ─────────────────────────────────────────────────
-
-async function execUnpinMessage(message, params) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-
-  const botPerms = message.channel.permissionsFor(guild.members.me);
-  if (!botPerms || !botPerms.has(PermissionFlagsBits.ManageMessages)) {
-    return { success: false, error: 'Bot tidak punya permission ManageMessages di channel ini.' };
-  }
-
-  if (!isOwner(message.author.id) && !message.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
-    return { success: false, error: 'Kamu tidak punya permission ManageMessages untuk unpin pesan.' };
-  }
-
-  let targetMessage = null;
-  const msgId = params.message_id;
-
-  // If replying to a message, unpin that
-  if (message.reference && message.reference.messageId) {
-    try {
-      targetMessage = await message.channel.messages.fetch(message.reference.messageId);
-    } catch {
-      return { success: false, error: 'Gagal mengambil pesan yang di-reply.' };
-    }
-  }
-  // If specific ID given
-  else if (msgId && /^\d+$/.test(msgId)) {
-    try {
-      targetMessage = await message.channel.messages.fetch(msgId);
-    } catch {
-      return { success: false, error: `Pesan dengan ID ${msgId} tidak ditemukan.` };
-    }
-  }
-  // Otherwise unpin the most recently pinned message
-  else {
-    try {
-      const pinned = await message.channel.messages.fetchPinned();
-      targetMessage = pinned.first();
-    } catch {
-      return { success: false, error: 'Gagal mengambil daftar pinned messages.' };
-    }
-  }
-
-  if (!targetMessage) return { success: false, error: 'Tidak ada pesan yang bisa di-unpin.' };
-
-  try {
-    if (!targetMessage.pinned) {
-      return { success: false, error: 'Pesan tersebut tidak sedang di-pin.' };
-    }
-    await targetMessage.unpin();
-    return {
-      success: true,
-      type: 'unpin_message',
-      messagePreview: targetMessage.content?.slice(0, 80) || '(embed/attachment)',
-      author: targetMessage.author.username,
-    };
-  } catch (err) {
-    return { success: false, error: err.message };
-  }
-}
-
-// ─── Summarize Channel ─────────────────────────────────────────────
-
-async function execSummarizeChannel(message, params, plan) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-
-  // Check if bot can read message history
-  const botPerms = message.channel.permissionsFor(guild.members.me);
-  if (!botPerms || !botPerms.has(PermissionFlagsBits.ReadMessageHistory)) {
-    return { success: false, error: 'Bot tidak punya permission ReadMessageHistory di channel ini. Aktifkan permission tersebut agar bot bisa membaca riwayat pesan.' };
-  }
-
-  const count = Math.min(Math.max(params.count || 50, 10), 100);
-
-  await message.channel.sendTyping();
-
-  try {
-    const messages = await message.channel.messages.fetch({ limit: count, before: message.id });
-    if (messages.size === 0) {
-      return { success: false, error: 'Tidak ada pesan yang bisa diringkas.' };
-    }
-
-    // Build conversation text from messages (oldest first)
-    const sorted = [...messages.values()].reverse();
-    const conversationLines = sorted
-      .filter(m => !m.author.bot && m.content?.trim())
-      .map(m => {
-        const time = m.createdAt.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
-        return `[${time}] ${m.author.username}: ${m.content.slice(0, 300)}`;
-      });
-
-    if (conversationLines.length === 0) {
-      return { success: false, error: 'Tidak ada pesan teks dari user yang bisa diringkas.' };
-    }
-
-    const conversationText = conversationLines.join('\n');
-
-    const summary = await chatCompletion([
-      {
-        role: 'system',
-        content: `Ringkas percakapan Discord berikut menjadi poin-poin utama yang mudah dipahami.
-ATURAN:
-- Buat ringkasan dalam 3-7 poin utama
-- Sebutkan topik yang dibahas dan siapa yang membahasnya
-- Gunakan bahasa Indonesia
-- Gunakan bullet points
-- Fokus pada informasi penting, keputusan, dan diskusi kunci
-- Jika ada kesimpulan atau keputusan, highlight itu`
-      },
-      { role: 'user', content: `Ringkas percakapan berikut (${conversationLines.length} pesan):\n\n${conversationText.slice(0, 6000)}` },
-    ]);
-
-    await message.reply(`📋 **Ringkasan ${conversationLines.length} pesan terakhir di #${message.channel.name}:**\n\n${summary.slice(0, 1900)}`);
-    return { success: true, type: 'summarize_channel', replied: true };
-  } catch (err) {
-    logger.error(`Summarize channel error: ${err.message}`);
-    return { success: false, error: `Gagal membaca riwayat pesan: ${err.message}` };
-  }
-}
-
-// ─── Announcement ──────────────────────────────────────────────────
 
 async function execAnnounceAsk(message, params, plan) {
   const guild = message.guild;
   if (!guild) return { success: false, error: 'Bukan di server' };
+
   if (!isOwner(message.author.id) && !message.member.permissions.has(PermissionFlagsBits.MentionEveryone)) {
-    return { success: false, error: 'Kamu tidak punya permission untuk membuat announcement.' };
+    return { success: false, error: 'Kamu tidak punya permission MentionEveryone untuk membuat pengumuman.' };
   }
 
-  const announcementText = params.text || plan.rawQuery;
-  if (!announcementText) return { success: false, error: 'Isi announcement kosong.' };
+  const defaultAnnounceId = config.announceChannelId;
+  const rawChannelId = params.channel_id ? params.channel_id.replace(/[<#>]/g, '') : null;
+  const targetChannelId = rawChannelId || defaultAnnounceId || message.channel.id;
 
-  // Build tag selection menu
-  const selectMenu = new StringSelectMenuBuilder()
-    .setCustomId(`jarvis_announce_tag_${message.id}`)
-    .setPlaceholder('Pilih tag untuk announcement...')
-    .addOptions([
-      { label: 'Tanpa Tag', description: 'Kirim tanpa mention siapapun', value: 'none', emoji: '📝' },
-      { label: '@everyone', description: 'Tag semua orang di server', value: 'everyone', emoji: '📢' },
-      { label: '@here', description: 'Tag yang sedang online saja', value: 'here', emoji: '🟢' },
-    ]);
+  const targetChannel = guild.channels.cache.get(targetChannelId);
+  if (!targetChannel) {
+    return { success: false, error: 'Channel pengumuman tidak ditemukan.' };
+  }
 
-  const row = new ActionRowBuilder().addComponents(selectMenu);
-  const cancelBtn = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`jarvis_announce_cancel_${message.id}`)
-      .setLabel('❌ Batal')
-      .setStyle(ButtonStyle.Danger)
-  );
+  const botPerms = targetChannel.permissionsFor(guild.members.me);
+  if (!botPerms || !botPerms.has(PermissionFlagsBits.SendMessages)) {
+    return { success: false, error: `Bot tidak punya permission SendMessages di channel <#${targetChannel.id}>.` };
+  }
 
-  const preview = `📢 **Preview Announcement:**\n\n${announcementText}\n\n*Pilih tag di bawah, atau batal:*`;
-  const reply = await message.reply({ content: preview, components: [row, cancelBtn] });
+  const announceText = params.text || plan.rawQuery;
 
   try {
-    const interaction = await reply.awaitMessageComponent({
-      filter: (i) => i.user.id === message.author.id,
-      time: 60_000,
-    });
-
-    if (interaction.customId.startsWith('jarvis_announce_cancel')) {
-      await interaction.update({ content: '❌ Announcement dibatalkan.', components: [] });
-      return { success: true, type: 'announce_cancelled', replied: true };
-    }
-
-    await interaction.deferUpdate();
-    const tagChoice = interaction.values[0];
-
-    // Determine target channel: params > server-settings > config (.env) > current channel
-    let targetChannel = null;
-    if (params.channel_id) {
-      targetChannel = guild.channels.cache.get(params.channel_id);
-    }
-    if (!targetChannel) {
-      const settingsAnnounce = getSetting(guild.id, 'announceChannelId');
-      if (settingsAnnounce) targetChannel = guild.channels.cache.get(settingsAnnounce);
-    }
-    if (!targetChannel && config.announceChannelId) {
-      targetChannel = guild.channels.cache.get(config.announceChannelId);
-    }
-    if (!targetChannel) {
-      targetChannel = message.channel;
-    }
-
-    // Build announcement message
-    let prefix = '';
-    if (tagChoice === 'everyone') prefix = '@everyone\n\n';
-    else if (tagChoice === 'here') prefix = '@here\n\n';
-
-    const finalMsg = `${prefix}📢 **ANNOUNCEMENT**\n\n${announcementText}`;
-
-    await targetChannel.send({
-      content: finalMsg,
-      allowedMentions: { parse: tagChoice === 'none' ? [] : ['everyone'] }
-    });
-
-    const tagLabel = tagChoice === 'none' ? 'tanpa tag' : `@${tagChoice}`;
-    await reply.edit({ content: `✅ Announcement terkirim ke <#${targetChannel.id}> (${tagLabel})!`, components: [] });
-    return { success: true, type: 'announcement', replied: true };
-  } catch {
-    try { await reply.edit({ content: '⏰ Waktu habis, announcement dibatalkan.', components: [] }); } catch { }
-    return { success: true, type: 'announce_timeout', replied: true };
-  }
-}
-
-// ─── Warn System ───────────────────────────────────────────────────
-
-async function execWarn(message, params) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-  if (!isOwner(message.author.id) && !message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) {
-    return { success: false, error: 'Tidak punya permission ModerateMembers untuk warn.' };
-  }
-
-  const targetId = extractUserId(params.target_id);
-  if (!targetId) return { success: false, error: 'Target user tidak ditemukan.' };
-
-  const member = await guild.members.fetch(targetId).catch(() => null);
-  if (!member) return { success: false, error: 'User tidak ada di server.' };
-
-  const reason = params.reason || 'Tidak disebutkan';
-  const result = addWarning(guild.id, targetId, reason, message.author.id);
-
-  // Auto-action at thresholds
-  let extraAction = '';
-  if (result.total === 3) {
-    try {
-      await member.timeout(10 * 60 * 1000, `Auto-timeout: ${result.total} warnings`);
-      extraAction = '\n⏱️ **Auto-timeout 10 menit** (3 peringatan tercapai)';
-    } catch { extraAction = '\n⚠️ Gagal auto-timeout (permission?)'; }
-  } else if (result.total >= 5) {
-    try {
-      await member.timeout(60 * 60 * 1000, `Auto-timeout: ${result.total} warnings`);
-      extraAction = '\n⏱️ **Auto-timeout 1 jam** (5+ peringatan tercapai)';
-    } catch { extraAction = '\n⚠️ Gagal auto-timeout (permission?)'; }
-  }
-
-  return {
-    success: true,
-    type: 'warn',
-    targetName: member.displayName,
-    targetId,
-    reason,
-    totalWarnings: result.total,
-    extraAction,
-  };
-}
-
-async function execWarnList(message, params) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-
-  const targetId = extractUserId(params.target_id);
-  if (!targetId) return { success: false, error: 'Target user tidak ditemukan.' };
-
-  const member = await guild.members.fetch(targetId).catch(() => null);
-  const warnings = getWarnings(guild.id, targetId);
-
-  return {
-    success: true,
-    type: 'warn_list',
-    targetName: member?.displayName || `User ${targetId}`,
-    warnings,
-  };
-}
-
-async function execWarnClear(message, params) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-  if (!isOwner(message.author.id) && !message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) {
-    return { success: false, error: 'Tidak punya permission ModerateMembers.' };
-  }
-
-  const targetId = extractUserId(params.target_id);
-  if (!targetId) return { success: false, error: 'Target user tidak ditemukan.' };
-
-  const member = await guild.members.fetch(targetId).catch(() => null);
-  const count = clearWarnings(guild.id, targetId);
-
-  return {
-    success: true,
-    type: 'warn_clear',
-    targetName: member?.displayName || `User ${targetId}`,
-    clearedCount: count,
-  };
-}
-
-// ─── Create Channel ────────────────────────────────────────────────
-
-async function execCreateChannel(message, params) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-
-  // Check permissions
-  if (!isOwner(message.author.id) && !message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-    return { success: false, error: 'Kamu tidak punya permission ManageChannels.' };
-  }
-
-  const botPerms = guild.members.me.permissions;
-  if (!botPerms.has(PermissionFlagsBits.ManageChannels)) {
-    return { success: false, error: 'Bot tidak punya permission ManageChannels.' };
-  }
-
-  const channelName = params.name;
-  if (!channelName) return { success: false, error: 'Nama channel tidak disebutkan.' };
-
-  // Determine channel type
-  const typeStr = (params.type || 'text').toLowerCase();
-  let channelType;
-  if (typeStr === 'voice' || typeStr === 'vc') {
-    channelType = ChannelType.GuildVoice;
-  } else {
-    channelType = ChannelType.GuildText;
-  }
-
-  // Find category if specified
-  let parent = null;
-  if (params.category) {
-    parent = guild.channels.cache.find(
-      ch => ch.type === ChannelType.GuildCategory &&
-        ch.name.toLowerCase().includes(params.category.toLowerCase())
-    );
-  }
-
-  try {
-    const newChannel = await guild.channels.create({
-      name: channelName,
-      type: channelType,
-      parent: parent?.id || null,
-    });
-
-    return {
-      success: true,
-      type: 'create_channel',
-      channelName: newChannel.name,
-      channelId: newChannel.id,
-      channelType: channelType === ChannelType.GuildVoice ? 'voice' : 'text',
-      category: parent?.name || null,
-    };
-  } catch (err) {
-    return { success: false, error: `Gagal membuat channel: ${err.message}` };
-  }
-}
-
-// ─── Delete Channel ────────────────────────────────────────────────
-
-async function execDeleteChannel(message, params) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-
-  if (!isOwner(message.author.id) && !message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-    return { success: false, error: 'Kamu tidak punya permission ManageChannels.' };
-  }
-
-  let targetChannel = null;
-
-  // Find by ID
-  if (params.channel_id) {
-    const chId = params.channel_id.replace(/[<#>]/g, '');
-    targetChannel = guild.channels.cache.get(chId);
-  }
-
-  // Find by name
-  if (!targetChannel && params.channel_name) {
-    targetChannel = guild.channels.cache.find(
-      ch => ch.name.toLowerCase() === params.channel_name.toLowerCase().replace(/\s+/g, '-')
-    );
-  }
-
-  if (!targetChannel) return { success: false, error: 'Channel tidak ditemukan.' };
-
-  // Safety: don't delete the channel the command was sent in
-  if (targetChannel.id === message.channel.id) {
-    return { success: false, error: 'Tidak bisa menghapus channel tempat perintah ini dikirim.' };
-  }
-
-  const channelName = targetChannel.name;
-
-  try {
-    // Confirmation UI
-    const confirmId = `confirm_del_${targetChannel.id}_${Date.now()}`;
-    const cancelId = `cancel_del_${targetChannel.id}_${Date.now()}`;
+    const confirmId = `confirm_announce_${Date.now()}`;
+    const cancelId = `cancel_announce_${Date.now()}`;
 
     const embed = new EmbedBuilder()
-      .setColor('#ff0000')
-      .setTitle('⚠️ Konfirmasi Hapus Channel')
-      .setDescription(`Apakah kamu yakin ingin menghapus channel **${channelName}**? Tindakan ini tidak bisa dibatalkan!`);
+      .setColor('#3b5998')
+      .setTitle('📢 Draf Pengumuman')
+      .setDescription(`Apakah kamu yakin ingin mengirim pengumuman berikut ke <#${targetChannel.id}>?\n\n${announceText}`);
 
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(confirmId).setLabel('✅ Yakin Hapus').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(confirmId).setLabel('✅ Kirim').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId(cancelId).setLabel('❌ Batal').setStyle(ButtonStyle.Secondary)
     );
 
@@ -1394,195 +516,30 @@ async function execDeleteChannel(message, params) {
     try {
       const i = await reply.awaitMessageComponent({
         filter: (interaction) => interaction.user.id === message.author.id,
-        time: 30000
+        time: 45000
       });
       await i.deferUpdate();
 
       if (i.customId === confirmId) {
-        await targetChannel.delete(`Dihapus oleh ${message.author.username} via bot`);
-        await reply.edit({ content: `🗑️ Channel **${channelName}** sudah dihapus.`, embeds: [], components: [] });
+        await targetChannel.send(announceText);
+        await reply.edit({ content: `✅ Pengumuman dikirim ke <#${targetChannel.id}>.`, embeds: [], components: [] });
+        return { success: true, type: 'announce', replied: true };
       } else {
-        await reply.edit({ content: '❌ Hapus channel dibatalkan.', embeds: [], components: [] });
+        await reply.edit({ content: '❌ Pengumuman dibatalkan.', embeds: [], components: [] });
+        return { success: true, type: 'cancelled', replied: true };
       }
-      return { success: true, type: 'cancelled', replied: true };
     } catch {
-      await reply.edit({ content: '⏰ Waktu konfirmasi habis. Hapus channel dibatalkan.', embeds: [], components: [] });
+      await reply.edit({ content: '⏰ Waktu konfirmasi habis. Pengumuman dibatalkan.', embeds: [], components: [] });
       return { success: true, type: 'cancelled', replied: true };
     }
   } catch (err) {
-    return { success: false, error: `Gagal menghapus channel: ${err.message}` };
+    return { success: false, error: err.message };
   }
-}
-
-// ─── Setup VoiceMaster ─────────────────────────────────────────────
-
-async function execSetupVoiceMaster(message, params) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-
-  if (!isOwner(message.author.id) && !message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-    return { success: false, error: 'Kamu tidak punya permission ManageChannels.' };
-  }
-
-  const action = (params.action || 'enable').toLowerCase();
-
-  // ─── Disable VoiceMaster ──────────────────────────────────────
-  if (action === 'disable' || action === 'off' || action === 'hapus' || action === 'matikan') {
-    if (!isVoiceMasterActive(guild.id)) {
-      return { success: false, error: 'VoiceMaster belum aktif di server ini.' };
-    }
-    removeVoiceMaster(guild.id);
-    return { success: true, type: 'voicemaster_disabled' };
-  }
-
-  // ─── Enable VoiceMaster ───────────────────────────────────────
-  let hubChannelId = params.hub_channel_id;
-
-  // If a specific channel ID was given, validate it
-  if (hubChannelId) {
-    hubChannelId = hubChannelId.replace(/[<#>]/g, '');
-    const ch = guild.channels.cache.get(hubChannelId);
-    if (!ch || ch.type !== ChannelType.GuildVoice) {
-      return { success: false, error: 'Channel hub harus berupa voice channel yang sudah ada.' };
-    }
-    setupVoiceMaster(guild.id, hubChannelId);
-    return {
-      success: true,
-      type: 'voicemaster_enabled',
-      hubChannelName: ch.name,
-      hubChannelId: ch.id,
-      created: false,
-    };
-  }
-
-  // No hub channel specified — create one automatically
-  try {
-    const hubChannel = await guild.channels.create({
-      name: '➕ Create VC',
-      type: ChannelType.GuildVoice,
-      reason: 'VoiceMaster hub channel',
-    });
-
-    setupVoiceMaster(guild.id, hubChannel.id);
-    return {
-      success: true,
-      type: 'voicemaster_enabled',
-      hubChannelName: hubChannel.name,
-      hubChannelId: hubChannel.id,
-      created: true,
-    };
-  } catch (err) {
-    return { success: false, error: `Gagal membuat hub channel: ${err.message}` };
-  }
-}
-
-// ─── Set Config ────────────────────────────────────────────────────
-
-async function execSetConfig(message, params) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-
-  // Owner only
-  if (!isOwner(message.author.id)) {
-    return { success: false, error: 'Hanya owner bot yang bisa mengubah pengaturan.' };
-  }
-
-  const setting = (params.setting || '').toLowerCase().replace(/\s+/g, '_');
-  let channelId = params.channel_id;
-
-  // Map setting names to internal keys
-  const settingMap = {
-    'welcome_channel': 'welcomeChannelId',
-    'welcome': 'welcomeChannelId',
-    'announce_channel': 'announceChannelId',
-    'announcement_channel': 'announceChannelId',
-    'announcement': 'announceChannelId',
-    'announce': 'announceChannelId',
-  };
-
-  const internalKey = settingMap[setting];
-  if (!internalKey) {
-    return { success: false, error: `Setting "${setting}" tidak dikenali. Pilihan: welcome_channel, announce_channel` };
-  }
-
-  // Handle remove/clear
-  if (!channelId || channelId === 'none' || channelId === 'hapus' || channelId === 'remove') {
-    removeSetting(guild.id, internalKey);
-    return {
-      success: true,
-      type: 'set_config',
-      setting: setting,
-      action: 'removed',
-      channelName: null,
-    };
-  }
-
-  // Extract channel ID from mention format <#id>
-  channelId = channelId.replace(/[<#>]/g, '');
-
-  // If it's "here" or "sini", use current channel
-  if (channelId === 'here' || channelId === 'sini' || channelId === 'di_sini') {
-    channelId = message.channel.id;
-  }
-
-  // Validate channel exists
-  const channel = guild.channels.cache.get(channelId);
-  if (!channel) {
-    return { success: false, error: 'Channel tidak ditemukan. Mention channel pakai #nama atau kirim perintah di channel yang mau diset.' };
-  }
-
-  setSetting(guild.id, internalKey, channelId);
-  return {
-    success: true,
-    type: 'set_config',
-    setting: setting,
-    action: 'set',
-    channelName: channel.name,
-    channelId: channel.id,
-  };
-}
-
-// ─── Get Config ────────────────────────────────────────────────────
-
-async function execGetConfig(message) {
-  const guild = message.guild;
-  if (!guild) return { success: false, error: 'Bukan di server' };
-
-  const settings = getAllSettings(guild.id);
-
-  const lines = ['📋 **Pengaturan Server:**\n'];
-
-  // Welcome channel
-  if (settings.welcomeChannelId) {
-    const ch = guild.channels.cache.get(settings.welcomeChannelId);
-    lines.push(`👋 **Welcome Channel:** ${ch ? `<#${ch.id}>` : `ID: ${settings.welcomeChannelId} (tidak ditemukan)`}`);
-  } else {
-    lines.push('👋 **Welcome Channel:** _belum diatur_ (menggunakan system channel)');
-  }
-
-  // Announce channel
-  if (settings.announceChannelId) {
-    const ch = guild.channels.cache.get(settings.announceChannelId);
-    lines.push(`📢 **Announcement Channel:** ${ch ? `<#${ch.id}>` : `ID: ${settings.announceChannelId} (tidak ditemukan)`}`);
-  } else {
-    lines.push('📢 **Announcement Channel:** _belum diatur_ (menggunakan channel saat ini)');
-  }
-
-  // VoiceMaster
-  if (settings.voicemasterHubId) {
-    const ch = guild.channels.cache.get(settings.voicemasterHubId);
-    lines.push(`🔊 **VoiceMaster Hub:** ${ch ? `<#${ch.id}>` : `ID: ${settings.voicemasterHubId} (tidak ditemukan)`}`);
-  } else {
-    lines.push('🔊 **VoiceMaster:** _tidak aktif_');
-  }
-
-  lines.push('\n💡 *Ubah pengaturan: "@bot set welcome channel ke #channel"*');
-
-  await message.reply(lines.join('\n'));
-  return { success: true, type: 'get_config', replied: true };
 }
 
 // ─── Direct Action Result Formatter (no AI call) ───────────────────
+
+const randomOf = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
 function formatActionResult(plan, result) {
   if (!result.success) {
@@ -1629,8 +586,13 @@ function formatActionResult(plan, result) {
       return `🏷️ Role **${result.roleName}** sudah dihapus dari **${result.targetName}**.`;
     }
 
-    case 'timeout':
-      return `⏱️ **${result.targetName}** sudah di-timeout selama **${result.duration}**.`;
+    case 'timeout': {
+      return randomOf([
+        `⏱️ **${result.targetName}** sudah di-timeout selama **${result.duration}**.`,
+        `⏱️ Istirahat dulu ya! **${result.targetName}** di-timeout **${result.duration}**.`,
+        `⏱️ Di-timeout dulu **${result.targetName}** selama **${result.duration}** biar adem.`
+      ]);
+    }
 
     case 'nickname':
       return `✏️ Nickname **${result.oldName}** sudah diganti jadi **${result.newName}**.`;
@@ -1641,10 +603,18 @@ function formatActionResult(plan, result) {
     }
 
     case 'bot_sleep':
-      return '😴 Oke, aku tidur dulu. Nanti mention lagi kalau butuh ya!';
+      return randomOf([
+        '😴 Oke, aku tidur dulu. Nanti mention lagi kalau butuh ya!',
+        '😴 Ngantuk... Aku bobo dulu. Jangan lupa bangunin nanti!',
+        '😴 Bye, mau hibernasi dulu. Ketik bangunkanku kalau butuh.'
+      ]);
 
     case 'bot_wake':
-      return '🟢 Siap bertugas kembali!';
+      return randomOf([
+        '🟢 Siap bertugas kembali!',
+        '🟢 Halo lagi! Ada kerjaan apa nih?',
+        '🟢 Sudah bangun! Siap melayani, Bos!'
+      ]);
 
     case 'warn': {
       let msg = `⚠️ **${result.targetName}** telah diberi peringatan!\n`;
@@ -1673,10 +643,18 @@ function formatActionResult(plan, result) {
       return `🗑️ **${result.clearedCount}** peringatan untuk **${result.targetName}** sudah dihapus.`;
 
     case 'ban':
-      return `🔨 **${result.targetName}** sudah di-ban dari server.\n📝 Alasan: ${result.reason}`;
+      return randomOf([
+        `🔨 **${result.targetName}** sudah di-ban dari server.\n📝 Alasan: ${result.reason}`,
+        `🔨 Toko palu beraksi! **${result.targetName}** berhasil di-ban.\n📝 Alasan: ${result.reason}`,
+        `🔨 Selamat tinggal **${result.targetName}**, kamu resmi di-ban.\n📝 Alasan: ${result.reason}`
+      ]);
 
     case 'kick':
-      return `👢 **${result.targetName}** sudah di-kick dari server.\n📝 Alasan: ${result.reason}`;
+      return randomOf([
+        `👢 **${result.targetName}** sudah di-kick dari server.\n📝 Alasan: ${result.reason}`,
+        `👢 Tendangan maut meluncur! **${result.targetName}** berhasil di-kick.\n📝 Alasan: ${result.reason}`,
+        `👢 **${result.targetName}** didepak dari server.\n📝 Alasan: ${result.reason}`
+      ]);
 
     case 'pin_message':
       return `📌 Pesan dari **${result.author}** berhasil di-pin: "${result.messagePreview}"`;
@@ -1793,14 +771,16 @@ async function sendWithArticleButton(message, answer, query, userId) {
     let articleText = text + '\n\n';
     if (sources.length > 0) {
       articleText += '📚 **Sumber Artikel:**\n';
-      sources.forEach((s, i) => { articleText += `${i + 1}. [${s.title}](${s.url})\n`; });
-      if (ragAnswer && ragAnswer !== answer) articleText += `\n📝 **Info tambahan:**\n${ragAnswer.slice(0, 800)}`;
+      sources.forEach((s, idx) => {
+        articleText += `[${idx + 1}] ${s.title} — ${s.url}\n`;
+      });
+      articleText += `\n${ragAnswer}`;
     } else {
-      articleText += '❌ Ga nemu artikel resmi buat topik ini.';
+      articleText += '❌ Tidak menemukan artikel terkait.';
     }
     await reply.edit({ content: articleText.length > 1950 ? articleText.slice(0, 1950) + '...' : articleText, components: [] });
   } catch {
-    try { await reply.edit({ components: [] }); } catch { }
+    try { await reply.edit({ components: [] }); } catch { /* reply already gone */ }
   }
 
   return null; // Already replied
@@ -1829,24 +809,11 @@ async function handleUpdateLearn(message) {
 
 // ─── Utility ───────────────────────────────────────────────────────
 
-function extractUserId(str) {
-  if (!str) return null;
-  const match = str.match(/<@!?(\d+)>/);
-  if (match) return match[1];
-  if (/^\d+$/.test(str)) return str;
-  return null;
-}
-
 async function playVoiceIfInChannel(message, text) {
-  const voiceChannel = getMemberVoiceChannel(message.member);
-  if (voiceChannel) {
-    try {
-      const voiceText = await condenseForVoice(text);
-      const audioBuffer = await synthesize(voiceText);
-      await playInVoiceChannel(voiceChannel, audioBuffer);
-    } catch (voiceErr) {
-      logger.error(`Mention Voice playback error: ${voiceErr.message}`);
-    }
+  try {
+    await handleVoiceResponse(message.member, text);
+  } catch (voiceErr) {
+    logger.error(`Mention Voice playback error: ${voiceErr.message}`);
   }
 }
 

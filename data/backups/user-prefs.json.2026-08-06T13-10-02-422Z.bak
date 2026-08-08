@@ -1,0 +1,18 @@
+{
+  "407516822284402690": {
+    "responseStyle": "concise",
+    "language": "id",
+    "interactionCount": 14,
+    "avgMessageLength": 21,
+    "preferMarkdown": true,
+    "lastUpdated": 1786021224968
+  },
+  "615133830646595584": {
+    "responseStyle": "balanced",
+    "language": "auto",
+    "interactionCount": 1,
+    "avgMessageLength": 21,
+    "preferMarkdown": true,
+    "lastUpdated": 1785521611479
+  }
+}

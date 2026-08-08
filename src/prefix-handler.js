@@ -4,16 +4,14 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ComponentType,
-  AttachmentBuilder,
   ChannelType,
   PermissionFlagsBits,
 } from 'discord.js';
 import { chatCompletion, getAiStats } from './ai/openrouter.js';
-import { SYSTEM_PROMPT } from './ai/prompts.js';
+import { buildJarvisPrompt, SUMMARIZE_PROMPT } from './ai/prompts.js';
 import { ragPipeline } from './rag/pipeline.js';
 import { scrapeUrl } from './rag/scraper.js';
-import { SUMMARIZE_PROMPT } from './ai/prompts.js';
-import { condenseForVoice, synthesize } from './voice/tts.js';
+import { condenseForVoice, synthesize, resolveEnglishVoice } from './voice/tts.js';
 import { playInVoiceChannel, getMemberVoiceChannel } from './voice/player.js';
 import {
   buildAnswerEmbed,
@@ -25,10 +23,12 @@ import {
 import { getHistory, addMessage, clearHistory } from './utils/memory.js';
 import { isOwner } from './utils/permissions.js';
 import { parseDuration, formatDuration } from './utils/reminders.js';
-import { addWarning } from './utils/warnings.js';
+import { addWarning, applyWarningEscalation } from './utils/warnings.js';
+import { getSetting, setSetting } from './utils/server-settings.js';
+import { isAfk, setAfk, clearAfk, getAfk, formatAfkSince } from './utils/afk.js';
 import config from './config.js';
 import logger from './utils/logger.js';
-import { fetchWeather, getWeatherCodeInfo } from './utils/weather.js';
+import { execPing, execWeather, execInvite } from './actions/index.js';
 
 const PREFIX = '!';
 
@@ -79,6 +79,10 @@ export async function handlePrefixCommand(message) {
     case 'admin-clear':
       return handleAdminClear(message, args);
 
+    case 'admin-voicewelcome':
+    case 'admin-voice-welcome':
+      return handleAdminVoiceWelcomeToggle(message, args);
+
     // New moderation/utility commands requested by the user
     case 'cvoice':
       return handleCVoice(message, args);
@@ -97,6 +101,9 @@ export async function handlePrefixCommand(message) {
     case 'cn':
       return handleCn(message, args);
 
+    case 'act':
+      return handleAct(message, args);
+
     case 'ping':
       return handlePing(message);
     case 'weather':
@@ -105,6 +112,9 @@ export async function handlePrefixCommand(message) {
     case 'invite':
     case 'undang':
       return handleInvite(message);
+
+    case 'afk':
+      return handleAfk(message, args);
 
     default:
       // Unknown command — silently ignore
@@ -127,7 +137,7 @@ async function handleAsk(message, query, mode) {
   try {
     // Answer naturally first
     const answer = await chatCompletion([
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: buildJarvisPrompt({}) },
       { role: 'user', content: query },
     ]);
 
@@ -175,7 +185,7 @@ async function handleAsk(message, query, mode) {
       const ragEmbed = buildAnswerEmbed({ query, answer: ragAnswer, sources, mode });
       await reply.edit({ embeds: [ragEmbed], components: [] });
     } catch {
-      try { await reply.edit({ components: [] }); } catch {}
+      try { await reply.edit({ components: [] }); } catch { /* reply already gone */ }
     }
   } catch (err) {
     logger.error(`!ask error: ${err.message}`);
@@ -195,9 +205,10 @@ async function handleChat(message, text, mode) {
 
   try {
     const history = getHistory(message.author.id);
+    const systemPrompt = buildJarvisPrompt({});
     const messages = [
-      { role: 'system', content: SYSTEM_PROMPT },
-      ...history,
+      { role: 'system', content: systemPrompt },
+      ...history.slice(-6),
       { role: 'user', content: text },
     ];
 
@@ -264,6 +275,8 @@ async function handleHelp(message) {
       { name: '!chat <pesan>', value: 'Ngobrol (text mode)' },
       { name: '!chat-voice <pesan>', value: 'Ngobrol (voice mode)' },
       { name: '!summarize <url>', value: 'Ringkas artikel' },
+      { name: '!afk [alasan]', value: 'Set status AFK (cth: `!afk tidur`). `!afk off` untuk hapus' },
+      { name: '🧠 AFK natural', value: 'Bot auto-detect kalimat AFK, cth: `gw afk dulu mau makan` / `im going afk for dinner`' },
       { name: '!help', value: 'Panduan ini' },
       { name: '!cvoice [nama/ID channel]', value: 'Cek member di voice channel & statusnya (Mute, Deafen, Live)' },
       { name: '🔒 Moderasi (Admin/Mod Only)', value: 
@@ -275,7 +288,7 @@ async function handleHelp(message) {
         '`!prune <jumlah>` — Hapus pesan di channel (1-100)\n' +
         '`!cn <@user/nama> <nickname baru>` — Ganti nickname user'
       },
-      { name: '🔒 Admin Commands (Owner Only)', value: '`!admin-voice` `!admin-say` `!admin-status`\n`!admin-execute` `!admin-model` `!admin-clear`' },
+      { name: '🔒 Admin Commands (Owner Only)', value: '`!admin-voice` `!admin-say` `!admin-status`\n`!admin-execute` `!admin-model` `!admin-clear`\n`!admin-voicewelcome on|off|toggle` — Toggle sapaan suara di voice channel\n`!act <channel id> <pesan>` — Kirim pesan sebagai bot ke channel mana pun (tag: `@username` / `@userID` / `<@userID>` jadi mention asli)' },
     )
     .setFooter({ text: `${config.botName} • Prefix Commands` });
 
@@ -442,7 +455,7 @@ async function handleAdminSetModel(message, model) {
   await message.reply(`✅ Model: \`${old}\` → \`${model}\``);
 }
 
-async function handleAdminClear(message, mention) {
+async function handleAdminClear(message, _mention) {
   if (!isOwner(message.author.id)) return message.reply('🔒 Owner only.');
 
   const user = message.mentions.users.first();
@@ -452,30 +465,211 @@ async function handleAdminClear(message, mention) {
   await message.reply(`✅ Memory untuk ${user.tag} dihapus.`);
 }
 
+async function handleAdminVoiceWelcomeToggle(message, args) {
+  if (!isOwner(message.author.id)) return message.reply('🔒 Owner only.');
+  if (!message.guild) return message.reply('❌ Hanya bisa dipakai di server.');
+
+  const arg = (args || '').trim().toLowerCase();
+  const guildId = message.guild.id;
+  const current = getSetting(guildId, 'voiceWelcomeEnabled') !== false;
+
+  let next;
+  if (!arg || arg === 'status') {
+    const status = current ? '🟢 AKTIF' : '🔴 NONAKTIF';
+    return message.reply(`🔊 Voice welcome: **${status}**\nUsage: \`!admin-voicewelcome on|off|toggle\``);
+  } else if (['on', 'true', '1', 'enable', 'aktif'].includes(arg)) {
+    next = true;
+  } else if (['off', 'false', '0', 'disable', 'matikan', 'nonaktif'].includes(arg)) {
+    next = false;
+  } else if (['toggle', 'flip', 'switch'].includes(arg)) {
+    next = !current;
+  } else {
+    return message.reply('❗ Usage: `!admin-voicewelcome on|off|toggle`');
+  }
+
+  setSetting(guildId, 'voiceWelcomeEnabled', next);
+  const status = next ? '🟢 AKTIF' : '🔴 NONAKTIF';
+  logger.command(message.author.tag, `!admin-voicewelcome → ${next}`);
+  return message.reply(`✅ Voice welcome sekarang: **${status}**`);
+}
+
+// ─── !act (Owner Only) ────────────────────────────────────────────
+// Send a message AS the bot to any channel the bot can see.
+// Usage: !act <channelId> <message>  (channel id can be raw or <#id>)
+// Works from server channels and DMs.
+
+// Discord only turns "@name" into a real mention (<@id>) when it resolves at
+// typing time (autocomplete). Tags typed literally — pasted, from a DM, or for
+// a user in another server — stay as "@name" text and send as plain text.
+// This converts literal tags in the !act message into real mentions using the
+// TARGET channel's guild (usernames are single-word, so a single-token match
+// covers the common case; multi-word nicknames need <@id>).
+async function resolveMentions(text, channel) {
+  if (!text) return text;
+
+  // Bare user-ID form: @123456789012345678 -> <@123456789012345678>.
+  // (?<!<) guard: never touch @ids already inside <@...> mention brackets,
+  // otherwise <@id> would become <<@id>> and render as plain text.
+  let out = text.replace(/(?<!<)@(\d{15,20})/g, '<@$1>');
+
+  // Already-resolved forms (<@id>, <@!id>, <@&roleid>, <#id>) pass through.
+
+  if (!channel.guild) return out; // DM target — nothing to resolve against
+
+  // Collect unique literal @name tokens (skip @everyone/@here — API handles
+  // them; check is case-exact like Discord's own ping behavior)
+  const tokenRe = /(^|\s)@([a-zA-Z0-9][a-zA-Z0-9_.-]*)/g;
+  const names = new Set();
+  for (const m of out.matchAll(tokenRe)) {
+    const name = m[2];
+    if (name !== 'everyone' && name !== 'here') names.add(name);
+  }
+  if (names.size === 0) return out;
+
+  const replacements = new Map();
+  const unresolved = [];
+
+  for (const name of names) {
+    // Role from cache (cheap) — exact name match
+    const role = channel.guild.roles.cache.find(r => r.name.toLowerCase() === name.toLowerCase());
+    if (role) {
+      replacements.set(name, `<@&${role.id}>`);
+      continue;
+    }
+    // Member from cache first (exact username / nickname)
+    const lower = name.toLowerCase();
+    const cachedMember =
+      channel.guild.members.cache.find(m => m.user.username.toLowerCase() === lower) ||
+      channel.guild.members.cache.find(m => (m.nickname || '').toLowerCase() === lower);
+    if (cachedMember) {
+      replacements.set(name, `<@${cachedMember.id}>`);
+      continue;
+    }
+    unresolved.push(name);
+  }
+
+  // API search fallback (needs Server Members Intent) — run in parallel
+  await Promise.all(unresolved.map(async (name) => {
+    const lower = name.toLowerCase();
+    try {
+      const members = await channel.guild.members.fetch({ query: name, limit: 5 });
+      const member =
+        members.find(m => m.user.username.toLowerCase() === lower) ||
+        members.find(m => (m.nickname || '').toLowerCase() === lower) ||
+        members.first();
+      if (member) replacements.set(name, `<@${member.id}>`);
+    } catch (err) {
+      logger.debug(`!act: member lookup gagal untuk "${name}": ${err.message}`);
+    }
+  }));
+
+  return out.replace(tokenRe, (m, pre, name) => {
+    if (name === 'everyone' || name === 'here') return m;
+    const rep = replacements.get(name);
+    return rep ? `${pre}${rep}` : m;
+  });
+}
+
+async function handleAct(message, args) {
+  if (!isOwner(message.author.id)) {
+    return message.reply('🔒 Perintah ini hanya untuk owner bot.');
+  }
+
+  if (!args) {
+    return message.reply('❗ Usage: `!act <channel id> <pesan>`\nContoh: `!act 123456789012345678 Halo semua!`');
+  }
+
+  // Parse channel id (raw `123...` or mention `<#123...>`) + the message after it
+  const match = args.match(/^(?:<#)?(\d+)(?:>)?\s+([\s\S]+)/);
+  if (!match) {
+    return message.reply('❗ Format salah. Contoh: `!act 123456789012345678 Halo semua!`');
+  }
+
+  const [, rawChannelId, rawText] = match;
+  const text = rawText.trim().slice(0, 2000); // Discord 2000-char limit
+  if (!text) {
+    return message.reply('❗ Pesannya kosong. Contoh: `!act 123456789012345678 Halo semua!`');
+  }
+
+  // Resolve channel — check cache first, then fetch from API
+  let channel = message.client.channels.cache.get(rawChannelId);
+  if (!channel) {
+    try {
+      channel = await message.client.channels.fetch(rawChannelId);
+    } catch {
+      return message.reply(`❌ Channel \`${rawChannelId}\` tidak ditemukan atau bot tidak punya akses ke sana.`);
+    }
+  }
+
+  // Must be a text-capable channel — exclude voice, forum, and media channels
+  // (forum/media need thread creation, not plain channel.send)
+  if (
+    !channel.isTextBased ||
+    !channel.isTextBased() ||
+    channel.type === ChannelType.GuildForum ||
+    channel.type === ChannelType.GuildMedia
+  ) {
+    return message.reply('❌ Channel tersebut bukan channel teks biasa.');
+  }
+
+  // Permission check (DM channels have no permissions — skip there).
+  // Threads need SendMessagesInThreads, regular channels need SendMessages.
+  const botPerms = channel.permissionsFor?.(message.client.user.id);
+  const neededPerm = channel.isThread?.()
+    ? PermissionFlagsBits.SendMessagesInThreads
+    : PermissionFlagsBits.SendMessages;
+  if (botPerms && !botPerms.has(neededPerm)) {
+    return message.reply(`❌ Bot tidak punya permission untuk mengirim pesan di <#${channel.id}>.`);
+  }
+
+  // NOTE: owner-only tool — can reach any channel the bot can see in any guild,
+  // including DM channels. Owner-only gating is the intended safeguard.
+  try {
+    const finalText = await resolveMentions(text, channel);
+    await channel.send(finalText);
+    logger.command(message.author.tag, '!act', `→ <#${channel.id}>: "${finalText.slice(0, 80)}"`);
+
+    // Confirm via DM to keep it discreet; fall back to a normal reply
+    const confirm = `✅ Pesan terkirim ke <#${channel.id}> di **${channel.guild?.name || 'DM'}**.`;
+    try {
+      await message.author.send(confirm);
+    } catch {
+      await message.reply(confirm);
+    }
+
+    // Stealth: remove the trigger command (best-effort — needs ManageMessages)
+    await message.delete().catch(() => {});
+  } catch (err) {
+    logger.error(`!act error: ${err.message}`);
+    await message.reply(`❌ Gagal mengirim pesan: ${err.message}`);
+  }
+}
+
 // ─── Voice helper ──────────────────────────────────────────────────
 
 async function handleVoiceReply(message, answer, replyOptions) {
   try {
-    const voiceText = await condenseForVoice(answer);
-    const audioBuffer = await synthesize(voiceText);
     const voiceChannel = getMemberVoiceChannel(message.member);
 
-    if (voiceChannel) {
-      // Will play after message is sent
-      setTimeout(async () => {
-        try {
-          await playInVoiceChannel(voiceChannel, audioBuffer);
-        } catch (err) {
-          logger.error(`Voice play error: ${err.message}`);
-        }
-      }, 500);
-    } else {
-      const attachment = new AttachmentBuilder(audioBuffer, {
-        name: 'bot-response.mp3',
-      });
-      replyOptions.files = [attachment];
-      replyOptions.content = '🔊 *Kamu tidak di voice channel, aku kirim audionya di sini.*';
+    // Not in voice → skip TTS entirely to preserve rate limit.
+    // Text reply proceeds normally via the caller.
+    if (!voiceChannel) {
+      return;
     }
+
+    const voiceText = await condenseForVoice(answer);
+    // Translated text (TTS_TRANSLATE_ENGLISH) must use an English voice.
+    const voice = config.ttsTranslateEnglish ? resolveEnglishVoice() : undefined;
+    const audioBuffer = await synthesize(voiceText, voice);
+
+    // Will play after message is sent
+    setTimeout(async () => {
+      try {
+        await playInVoiceChannel(voiceChannel, audioBuffer);
+      } catch (err) {
+        logger.error(`Voice play error: ${err.message}`);
+      }
+    }, 500);
   } catch (err) {
     logger.error(`Voice error: ${err.message}`);
     replyOptions.content = '⚠️ *Voice gagal.*';
@@ -509,8 +703,8 @@ async function resolveMemberFromArgs(message, args) {
       if (/^\d+$/.test(targetStr)) {
         targetMember = await guild.members.fetch(targetStr).catch(() => null);
       } else {
-        await guild.members.fetch();
-        targetMember = guild.members.cache.find(m =>
+        const fetched = await guild.members.fetch({ query: targetStr, limit: 10 });
+        targetMember = fetched.find(m =>
           m.displayName.toLowerCase().includes(targetStr.toLowerCase()) ||
           m.user.username.toLowerCase().includes(targetStr.toLowerCase())
         );
@@ -613,21 +807,14 @@ async function handleWarn(message, args) {
 
   let replyText = `⚠️ **${member.displayName}** telah diperingatkan oleh **${message.author.username}**.\n📝 **Alasan:** ${reason}\n📊 **Total Peringatan:** ${result.total}/5`;
 
-  if (result.total === 3) {
-    try {
-      await member.timeout(10 * 60 * 1000, `Auto-timeout: 3 warnings reached`);
-      replyText += '\n⏱️ **Auto-timeout 10 menit** diterapkan (3 peringatan tercapai).';
-    } catch (err) {
-      replyText += '\n⚠️ Gagal menerapkan auto-timeout (bot tidak memiliki permission).';
-    }
-  } else if (result.total >= 5) {
-    try {
-      await member.timeout(60 * 60 * 1000, `Auto-timeout: 5+ warnings reached`);
-      replyText += '\n⏱️ **Auto-timeout 1 jam** diterapkan (5+ peringatan tercapai).';
-    } catch (err) {
-      replyText += '\n⚠️ Gagal menerapkan auto-timeout (bot tidak memiliki permission).';
-    }
-  }
+  // Shared escalation policy (warnings.js): 3 → timeout 10m, 5 → kick
+  const escalation = await applyWarningEscalation({
+    guild,
+    member,
+    total: result.total,
+    channelId: message.channel?.id ?? null,
+  });
+  replyText += escalation.text;
 
   await message.reply(replyText);
 }
@@ -824,29 +1011,7 @@ async function handleCn(message, args) {
 }
 
 async function handlePing(message) {
-  const msg = await message.reply('🏓 Pinging...');
-  const discordPing = message.client.ws.ping;
-
-  let googlePing = -1;
-  try {
-    const gStart = Date.now();
-    await fetch('https://www.google.com', { method: 'HEAD' });
-    googlePing = Date.now() - gStart;
-  } catch (err) {
-    // ignore
-  }
-
-  const embed = new EmbedBuilder()
-    .setColor('#00ffcc')
-    .setTitle('🏓 Pong!')
-    .addFields(
-      { name: '🌐 Discord Gateway Latency', value: `${discordPing}ms`, inline: true },
-      { name: '🔍 Google HTTP Latency', value: googlePing !== -1 ? `${googlePing}ms` : 'Error', inline: true }
-    )
-    .setFooter({ text: `Total round-trip time: ${Date.now() - message.createdTimestamp}ms` })
-    .setTimestamp();
-
-  await msg.edit({ content: null, embeds: [embed] });
+  return execPing(message);
 }
 
 async function handleWeather(message, args) {
@@ -854,50 +1019,49 @@ async function handleWeather(message, args) {
   if (!location) {
     return message.reply('⚠️ Harap masukkan lokasi yang ingin dicari. Contoh: `!weather Jakarta` atau `!cuaca Tokyo`');
   }
-
-  const msg = await message.reply('🔍 Memeriksa cuaca...');
-
-  const weatherData = await fetchWeather(location);
-  if (!weatherData) {
-    const errorEmbed = new EmbedBuilder()
-      .setColor('#ff4757')
-      .setTitle('❌ Lokasi Tidak Ditemukan')
-      .setDescription(`Maaf, tidak bisa menemukan informasi cuaca untuk lokasi **"${location}"**.`);
-    return await msg.edit({ content: null, embeds: [errorEmbed] });
-  }
-
-  const info = getWeatherCodeInfo(weatherData.current.weather_code);
-  const embed = new EmbedBuilder()
-    .setColor('#37b24d')
-    .setTitle(`${info.emoji} Cuaca Realtime di ${weatherData.name}, ${weatherData.country}`)
-    .addFields(
-      { name: '🌡️ Suhu Saat Ini', value: `${weatherData.current.temperature_2m}°C (Terasa seperti ${weatherData.current.apparent_temperature}°C)`, inline: true },
-      { name: '💧 Kelembapan', value: `${weatherData.current.relative_humidity_2m}%`, inline: true },
-      { name: '💨 Kecepatan Angin', value: `${weatherData.current.wind_speed_10m} km/h`, inline: true },
-      { name: '📊 Kondisi', value: info.label, inline: true },
-      { name: '📍 Koordinat', value: `${weatherData.latitude.toFixed(4)}, ${weatherData.longitude.toFixed(4)}`, inline: true },
-      { name: '🌍 Wilayah', value: weatherData.admin1 || '-', inline: true }
-    )
-    .setTimestamp();
-
-  await msg.edit({ content: null, embeds: [embed] });
+  return execWeather(message, { location });
 }
 
 async function handleInvite(message) {
-  const clientId = message.client.user.id;
-  const inviteUrl = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&permissions=3230720&scope=bot%20applications.commands`;
+  return execInvite(message);
+}
 
-  const embed = new EmbedBuilder()
-    .setColor('#5865F2')
-    .setTitle('🤖 Undang Bot Ini Ke Server Kamu!')
-    .setDescription('Klik tombol di bawah ini untuk mengundang bot ini ke server lain dengan hak akses Administrator dan Slash Commands.');
+// ─── !afk ──────────────────────────────────────────────────────────
+// Set/clear AFK status. Usage:
+//   !afk               → set AFK (default reason)
+//   !afk tidur         → set AFK with reason
+//   !afk off           → clear AFK manually
 
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setLabel('Undang Bot (Invite Link)')
-      .setStyle(ButtonStyle.Link)
-      .setURL(inviteUrl)
+async function handleAfk(message, args) {
+  const arg = (args || '').trim().toLowerCase();
+  const userId = message.author.id;
+
+  // Manual clear: !afk off / !afk end / !afk kembali
+  if (['off', 'end', 'stop', 'kembali', 'balik'].includes(arg)) {
+    const cleared = clearAfk(userId);
+    if (cleared) {
+      logger.command(message.author.tag, '!afk off');
+      return message.reply(`👋 Selamat kembali, <@${userId}>! Status AFK kamu ("${cleared.reason}") sudah dihapus.`);
+    }
+    return message.reply('❌ Kamu tidak sedang AFK.');
+  }
+
+  // Already AFK → tell them (they can use !afk off, or the status clears
+  // automatically when they send a normal message / type).
+  if (isAfk(userId)) {
+    const current = getAfk(userId);
+    return message.reply(
+      `😴 Kamu sudah AFK: **${current.reason}** (${formatAfkSince(current.setAt)}).\n` +
+      'Ketik `!afk off` untuk hapus, atau kirim pesan biasa — otomatis kembali.'
+    );
+  }
+
+  const reason = (args || '').trim() || 'Sedang AFK';
+  setAfk(userId, reason, message.guild?.id || null);
+  logger.command(message.author.tag, '!afk', reason);
+  return message.reply(
+    `😴 <@${userId}> sekarang **AFK**: ${reason}\n` +
+    'Kalau ada yang mention/reply kamu, mereka akan diberitahu.\n' +
+    'Status otomatis hilang saat kamu kirim pesan atau mengetik.'
   );
-
-  await message.reply({ embeds: [embed], components: [row] });
 }

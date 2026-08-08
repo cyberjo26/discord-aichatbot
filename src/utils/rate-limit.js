@@ -5,6 +5,7 @@
 const userLimits = new Map(); // userId -> { count, resetAt }
 const guildLimits = new Map(); // guildId -> { count, resetAt }
 
+const activeTokens = new Set();
 let activeGlobalRequests = 0;
 const MAX_GLOBAL_CONCURRENT = 50;
 
@@ -17,7 +18,7 @@ const MAX_GUILD_PER_WINDOW = 150;
  * 
  * @param {string} userId - User ID
  * @param {string|null} guildId - Guild ID (if any)
- * @returns {{ allowed: boolean, remaining: number, resetIn?: number, reason?: string }}
+ * @returns {{ allowed: boolean, remaining: number, resetIn?: number, reason?: string, token?: string }}
  */
 export function checkRateLimit(userId, guildId) {
   const now = Date.now();
@@ -51,12 +52,29 @@ export function checkRateLimit(userId, guildId) {
   }
   uLimit.count++;
 
-  activeGlobalRequests++;
-  return { allowed: true, remaining: MAX_USER_PER_WINDOW - uLimit.count };
+  const token = Math.random().toString(36).substring(2) + Date.now().toString(36);
+  activeTokens.add(token);
+  activeGlobalRequests = activeTokens.size;
+
+  return { allowed: true, remaining: MAX_USER_PER_WINDOW - uLimit.count, token };
 }
 
-export function releaseRateLimit() {
-  if (activeGlobalRequests > 0) activeGlobalRequests--;
+export function releaseRateLimit(token) {
+  if (token) {
+    if (activeTokens.has(token)) {
+      activeTokens.delete(token);
+      activeGlobalRequests = activeTokens.size;
+    }
+  } else {
+    // Legacy support/cleanup
+    if (activeTokens.size > 0) {
+      const firstToken = activeTokens.values().next().value;
+      activeTokens.delete(firstToken);
+      activeGlobalRequests = activeTokens.size;
+    } else if (activeGlobalRequests > 0) {
+      activeGlobalRequests--;
+    }
+  }
 }
 
 export function cleanupRateLimits() {

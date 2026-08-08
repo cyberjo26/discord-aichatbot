@@ -316,8 +316,11 @@ KEMBALIKAN HANYA JSON VALID:
       logger.warn(`Failed to generate embedding for new pattern: ${embErr.message}`);
     }
 
+    // Use max existing id + 1 (not array length): eviction of the least-used
+    // pattern shrinks the array, so length-based ids would collide.
+    const nextId = Math.max(0, ...patterns.map((p) => p.id || 0)) + 1;
     const newPattern = {
-      id: patterns.length + 1,
+      id: nextId,
       trigger: parsed.trigger || pending.originalMessage.slice(0, 50),
       meaning: parsed.meaning || pending.explanations.join('. '),
       examples: parsed.examples || [],

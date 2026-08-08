@@ -21,7 +21,6 @@ const {
   initReminders, 
   pollDueReminders, 
   setReminder,
-  cancelReminder,
   _setRemindersArray, 
   _getRemindersArray,
   _stopPolling,

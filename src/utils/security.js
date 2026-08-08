@@ -6,6 +6,8 @@ import https from 'https';
  * Checks if an IP is private or restricted.
  */
 function isPrivateIP(ip) {
+  if (typeof ip !== 'string') return false;
+
   // IPv4 mappings and actual IPv6 loopbacks/private
   if (ip === '::1') return true;
   if (ip.startsWith('fc00:') || ip.startsWith('fd')) return true; // Unique Local Address
@@ -40,7 +42,7 @@ export async function isSafeUrl(urlString) {
     const hostname = parsed.hostname;
     
     // Quick IP check before DNS
-    if (/^[0-9\.]+$/.test(hostname) || hostname.includes(':')) {
+    if (/^[0-9.]+$/.test(hostname) || hostname.includes(':')) {
       if (isPrivateIP(hostname.replace(/\[|\]/g, ''))) return false;
     }
 
@@ -59,15 +61,37 @@ export async function isSafeUrl(urlString) {
 
 /**
  * Custom DNS lookup for HTTP(S) Agents to prevent DNS rebinding.
+ *
+ * Node's `dns.lookup` callback signature depends on `options.all`:
+ *   - all:false (default) → (err, address: string, family)
+ *   - all:true             → (err, addresses: Array<{address, family}>, undefined)
+ * When `all:true` is in effect, `address` is an array, and calling
+ * `isPrivateIP(array)` crashed with "ip.startsWith is not a function".
+ * We handle both shapes defensively.
  */
 function safeLookup(hostname, options, callback) {
-  dns.lookup(hostname, options, (err, address, family) => {
-    if (err) return callback(err);
-    if (isPrivateIP(address)) {
-      return callback(new Error(`SSRF blocked: Resolved to restricted IP ${address}`));
-    }
-    callback(null, address, family);
-  });
+  try {
+    dns.lookup(hostname, options, (err, address, family) => {
+      if (err) return callback(err);
+
+      if (Array.isArray(address)) {
+        // `all:true` path: address is [{address, family}, ...].
+        for (const entry of address) {
+          const ipAddr = entry && typeof entry === 'object' ? entry.address : entry;
+          if (isPrivateIP(ipAddr)) {
+            return callback(new Error(`SSRF blocked: Resolved to restricted IP ${ipAddr}`));
+          }
+        }
+      } else if (isPrivateIP(address)) {
+        return callback(new Error(`SSRF blocked: Resolved to restricted IP ${address}`));
+      }
+
+      callback(null, address, family);
+    });
+  } catch (err) {
+    // Never let a lookup validation error crash the process.
+    callback(err);
+  }
 }
 
 export const safeHttpAgent = new http.Agent({ lookup: safeLookup });

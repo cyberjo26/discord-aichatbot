@@ -86,9 +86,16 @@ export function addMessage(userId, role, content) {
 
   // Generate context summary periodically
   if (entry.messageCount % config.contextSummaryInterval === 0 && entry.messages.length >= 4) {
-    generateContextSummary(userId, entry).catch((err) => {
-      logger.debug(`Context summary generation failed: ${err.message}`);
-    });
+    if (!entry.inFlightSummary) {
+      entry.inFlightSummary = true;
+      generateContextSummary(userId, entry)
+        .catch((err) => {
+          logger.debug(`Context summary generation failed: ${err.message}`);
+        })
+        .finally(() => {
+          entry.inFlightSummary = false;
+        });
+    }
   }
 }
 
@@ -170,9 +177,10 @@ async function generateContextSummary(userId, entry) {
 export function buildContextInjection(userId, messageContent = '') {
   const ctx = getContext(userId);
   
-  // Only inject context if relevant to current query
-  // Check if query references previous conversation
-  const needsContext = /\b(tadi|sebelumnya|yang|itu|earlier|before|that|dia|mereka|nya)\b/i.test(messageContent);
+  // Only inject context if query references previous conversation.
+  // Bare "tadi" is common filler in Indonesian speech, so it is excluded;
+  // only stronger references (compounds + clear continuation words) trigger.
+  const needsContext = /\b(sebelumnya|lanjut(?:kan)?|terus(?:kan)?|yang\s+tadi|itu\s+tadi|earlier|before|that\s+one|dia\s+itu|mereka\s+itu)\b/i.test(messageContent);
   
   if (!needsContext && ctx.messages.length < 3) {
     return ''; // Skip context for new conversations or simple queries
@@ -221,6 +229,6 @@ function cleanup() {
 }
 
 // Run cleanup every 10 minutes
-setInterval(cleanup, 10 * 60 * 1000);
+setInterval(cleanup, 10 * 60 * 1000).unref();
 
 export default { getHistory, getContext, addMessage, buildContextInjection, clearHistory };
