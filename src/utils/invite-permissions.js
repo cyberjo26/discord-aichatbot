@@ -10,6 +10,7 @@ import { PermissionFlagsBits } from 'discord.js';
  * Evidence for each permission — grep these paths if a permission
  * needs to be removed or added:
  *   - ManageMessages   → src/actions/moderation.js, prefix-handler.js (prune, pin/unpin)
+ *   - SendMessagesInThreads → prefix-handler.js (!act thread targets)
  *   - ModerateMembers  → src/actions/moderation.js (timeout, auto-timeout on warn)
  *   - KickMembers      → src/actions/moderation.js, prefix-handler.js (!kick)
  *   - BanMembers       → src/actions/moderation.js (execBanKick)
@@ -31,6 +32,7 @@ export const INVITE_PERMISSION_KEYS = [
   'EmbedLinks',
   'AttachFiles',
   'ReadMessageHistory',
+  'SendMessagesInThreads',
   'AddReactions',
   'UseExternalEmojis',
   'MentionEveryone',

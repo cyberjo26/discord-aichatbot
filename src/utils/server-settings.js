@@ -13,6 +13,7 @@ import { safeWriteJson } from './file-utils.js';
  * - welcomeChannelId: channel ID for welcoming new members
  * - announceChannelId: default channel ID for announcements
  * - voicemasterHubId: channel ID for VoiceMaster hub
+ * - autoVoiceRepliesEnabled: automatic voice replies for natural @bot conversations
  */
 
 const SETTINGS_FILE = config.serverSettingsFile || './data/server-settings.json';
@@ -76,7 +77,7 @@ export function getSettings(guildId) {
  * Get a specific setting for a guild, with fallback to config/.env
  * @param {string} guildId
  * @param {string} key - setting key (e.g. 'welcomeChannelId')
- * @returns {string|null}
+ * @returns {string|boolean|null}
  */
 export function getSetting(guildId, key) {
   const guildSettings = settings[guildId];
@@ -123,6 +124,8 @@ export function getAllSettings(guildId) {
     welcomeChannelId: guildSettings.welcomeChannelId || config.welcomeChannelId || null,
     announceChannelId: guildSettings.announceChannelId || config.announceChannelId || null,
     voicemasterHubId: guildSettings.voicemasterHubId || null,
+    autoVoiceRepliesEnabled:
+      guildSettings.autoVoiceRepliesEnabled !== undefined ? guildSettings.autoVoiceRepliesEnabled : true,
     voiceWelcomeEnabled:
       guildSettings.voiceWelcomeEnabled !== undefined ? guildSettings.voiceWelcomeEnabled : true,
   };

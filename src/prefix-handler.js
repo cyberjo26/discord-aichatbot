@@ -29,12 +29,20 @@ import { isAfk, setAfk, clearAfk, getAfk, formatAfkSince } from './utils/afk.js'
 import config from './config.js';
 import logger from './utils/logger.js';
 import { execPing, execWeather, execInvite } from './actions/index.js';
+import {
+  getReactionRoles,
+  addReactionRole,
+  removeReactionRole,
+  removeAllReactionRoles,
+  updateReactionRoleEmoji,
+  findMessageInGuild,
+} from './utils/reaction-roles.js';
 
 const PREFIX = '!';
 
 /**
  * Parse and handle prefix commands.
- * Supported: !ask, !chat, !summarize, !help, !admin
+ * Supported: !ask, !chat, !summarize, !help, !voice, !admin
  */
 export async function handlePrefixCommand(message) {
   const content = message.content.slice(PREFIX.length).trim();
@@ -59,6 +67,9 @@ export async function handlePrefixCommand(message) {
 
     case 'help':
       return handleHelp(message);
+
+    case 'voice':
+      return handleVoiceToggle(message, args);
 
     // Admin commands
     case 'admin-voice':
@@ -115,6 +126,9 @@ export async function handlePrefixCommand(message) {
 
     case 'afk':
       return handleAfk(message, args);
+
+    case 'rrole':
+      return handleRrole(message, args);
 
     default:
       // Unknown command — silently ignore
@@ -278,6 +292,7 @@ async function handleHelp(message) {
       { name: '!afk [alasan]', value: 'Set status AFK (cth: `!afk tidur`). `!afk off` untuk hapus' },
       { name: '🧠 AFK natural', value: 'Bot auto-detect kalimat AFK, cth: `gw afk dulu mau makan` / `im going afk for dinner`' },
       { name: '!help', value: 'Panduan ini' },
+      { name: '!voice on|off|status', value: 'Aktifkan/nonaktifkan auto voice reply saat ngobrol dengan `@bot` (Admin/Owner)' },
       { name: '!cvoice [nama/ID channel]', value: 'Cek member di voice channel & statusnya (Mute, Deafen, Live)' },
       { name: '🔒 Moderasi (Admin/Mod Only)', value: 
         '`!warn <@user/nama> [alasan]` — Beri warning ke user\n' +
@@ -333,6 +348,52 @@ async function handleHelp(message) {
     .setFooter({ text: `${config.botName} • Jarvis Mode` });
 
   await message.reply({ embeds: [helpEmbed, prefixEmbed, jarvisEmbed] });
+}
+
+// ─── !voice ────────────────────────────────────────────────────────
+// Controls automatic voice replies for natural @bot conversations.
+// Explicit !ask-voice / !chat-voice commands remain voice-enabled.
+
+async function handleVoiceToggle(message, args) {
+  if (!message.guild) {
+    return message.reply('❌ Perintah ini hanya bisa digunakan di server.');
+  }
+
+  const canManageVoiceReplies =
+    isOwner(message.author.id) ||
+    message.member?.permissions.has(PermissionFlagsBits.ManageGuild) ||
+    message.member?.permissions.has(PermissionFlagsBits.Administrator);
+
+  if (!canManageVoiceReplies) {
+    return message.reply('🔒 Kamu butuh permission **Manage Server** atau harus owner untuk mengatur auto voice reply.');
+  }
+
+  const arg = (args || '').trim().toLowerCase();
+  const guildId = message.guild.id;
+  const current = getSetting(guildId, 'autoVoiceRepliesEnabled') !== false;
+
+  if (!arg || arg === 'status') {
+    return message.reply(
+      `🔊 Auto voice reply: **${current ? 'AKTIF' : 'NONAKTIF'}**\n` +
+      'Usage: `!voice on|off|status`\n' +
+      'Pengaturan ini hanya memengaruhi chat natural `@bot`, bukan `!ask-voice` atau `!chat-voice`.'
+    );
+  }
+
+  let next;
+  if (['on', 'true', '1', 'enable', 'aktif'].includes(arg)) {
+    next = true;
+  } else if (['off', 'false', '0', 'disable', 'matikan', 'nonaktif'].includes(arg)) {
+    next = false;
+  } else {
+    return message.reply('❗ Usage: `!voice on|off|status`');
+  }
+
+  setSetting(guildId, 'autoVoiceRepliesEnabled', next);
+  return message.reply(
+    `✅ Auto voice reply sekarang: **${next ? 'AKTIF' : 'NONAKTIF'}**\n` +
+    'Berlaku untuk chat natural `@bot`; command voice eksplisit tetap tersedia.'
+  );
 }
 
 // ─── Admin commands (owner only) ───────────────────────────────────
@@ -1064,4 +1125,296 @@ async function handleAfk(message, args) {
     'Kalau ada yang mention/reply kamu, mereka akan diberitahu.\n' +
     'Status otomatis hilang saat kamu kirim pesan atau mengetik.'
   );
+}
+
+// ─── !rrole ────────────────────────────────────────────────────────
+// Reaction role management. Usage:
+//   !rrole setup <title> [description]   → buat panel reaction role
+//   !rrole add <msgId> <emoji> <@role>   → tambah binding
+//   !rrole remove <msgId> <emoji> [@role]→ hapus binding
+//   !rrole remove-all <msgId>            → hapus semua binding di pesan
+//   !rrole list                          → lihat semua binding
+
+function checkRrolePermission(message) {
+  if (isOwner(message.author.id)) return true;
+  if (message.member?.permissions.has(PermissionFlagsBits.ManageRoles)) return true;
+  if (message.member?.permissions.has(PermissionFlagsBits.Administrator)) return true;
+  return false;
+}
+
+function resolveEmojiPrefix(input) {
+  const trimmed = (input || '').trim();
+
+  // Discord custom emoji: <:name:123456> or <a:name:123456>
+  const match = trimmed.match(/^<a?:(\w+):(\d+)>$/);
+  if (match) return match[2];
+
+  // Plain numeric ID
+  if (/^\d{15,}$/.test(trimmed)) return trimmed;
+
+  // Unicode emoji
+  return trimmed;
+}
+
+async function handleRrole(message, args) {
+  if (!checkRrolePermission(message)) {
+    return message.reply('🔒 Kamu butuh izin **Manage Roles** atau harus owner untuk pakai `!rrole`.');
+  }
+
+  const parts = args ? args.split(/\s+/) : [];
+  const sub = (parts[0] || '').toLowerCase();
+  // Raw text after subcommand (preserves newlines)
+  const rawArgs = args ? args.slice(sub.length).trim() : '';
+
+  switch (sub) {
+    case 'setup':
+      return handleRroleSetup(message, rawArgs);
+    case 'add':
+      return handleRroleAdd(message, parts.slice(1));
+    case 'remove':
+      return handleRroleRemove(message, parts.slice(1));
+    case 'remove-all':
+      return handleRroleRemoveAll(message, parts.slice(1));
+    case 'list':
+      return handleRroleList(message);
+    case 'set-emoji':
+      return handleRroleSetEmoji(message, parts.slice(1));
+    default:
+      return message.reply(
+        '📋 **!rrole** — Reaction Role Manager\n' +
+        '```\n' +
+        '!rrole setup <judul> (deskripsi)\n' +
+        '!rrole setup <msgId>\n' +
+        '!rrole add <messageId> <emoji> <@role>\n' +
+        '!rrole remove <messageId> <emoji> [@role]\n' +
+        '!rrole remove-all <messageId>\n' +
+        '!rrole set-emoji <messageId> <oldEmoji> <newEmoji> <@role>\n' +
+        '!rrole list\n```\n' +
+        'Contoh: `!rrole setup Role Kalian (Pilih sesuai kebutuhan)`'
+      );
+  }
+}
+
+async function handleRroleSetup(message, raw) {
+  if (!raw) {
+    return message.reply(
+      '❗ **!rrole setup** — dua mode:\n' +
+      '• `!rrole setup <judul> (deskripsi)` — buat panel embed baru\n' +
+      '• `!rrole setup <msgId>` — pakai pesan yang sudah ada sebagai panel'
+    );
+  }
+
+  // Mode 1: raw is a message ID → reuse existing message as panel
+  const msgIdMatch = raw.match(/^(\d{17,20})$/);
+  if (msgIdMatch) {
+    const msgId = msgIdMatch[1];
+    const guild = message.guild;
+    const found = await findMessageInGuild(guild, msgId, message.channelId);
+    if (!found) {
+      return message.reply(`❌ Pesan \`${msgId}\` tidak ditemukan di server ini.`);
+    }
+    await message.reply(
+      `✅ Pesan \`${msgId}\` dari <#${found.channelId}> dijadikan panel reaction role!\n` +
+      'Gunakan `!rrole add <msgId> <emoji> <@role>` untuk tambah binding.'
+    );
+    return;
+  }
+
+  // Mode 2: raw is text → create new embed panel
+  // Parse: title (description) — description in parens stripped, placed on new line
+  // Newlines in description are preserved.
+  const parenIdx = raw.indexOf('(');
+  let title, description;
+  if (parenIdx !== -1 && raw.endsWith(')')) {
+    title = raw.slice(0, parenIdx).trim();
+    description = raw.slice(parenIdx + 1, -1).trim();
+  } else {
+    title = raw;
+    description = null;
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle(title)
+    .setFooter({ text: 'Reaction Roles — klik emoji di bawah untuk dapat role!' })
+    .setTimestamp();
+
+  if (description) {
+    embed.setDescription(description);
+  }
+
+  await message.channel.send({ embeds: [embed] });
+  message.reply('✅ Panel dibuat. Gunakan `!rrole add <messageId> <emoji> <@role>` untuk tambah binding.');
+}
+
+async function handleRroleAdd(message, rest) {
+  if (rest.length < 3) {
+    return message.reply('❗ Gunakan: `!rrole add <messageId> <emoji> <@role>`\nContoh: `!rrole add 123456789012345678 🎨 @Artist`');
+  }
+
+  const messageId = rest[0];
+  const emojiRaw = rest[1];
+  const roleMention = rest[2];
+  const roleId = roleMention.replace(/^<@&/, '').replace(/>$/, '');
+  const role = message.guild.roles.cache.get(roleId);
+  if (!role) {
+    return message.reply(`❌ Role tidak ditemukan: ${roleMention}`);
+  }
+
+  const emoji = resolveEmojiPrefix(emojiRaw);
+
+  // Validate message exists (scan all guild channels)
+  const guild = message.guild;
+  const msg = await findMessageInGuild(guild, messageId, message.channelId);
+  if (!msg) {
+    return message.reply(`❌ Pesan \`${messageId}\` tidak ditemukan di server ini. Pastikan ID benar dan bot punya akses ke channel-nya.`);
+  }
+
+  // React to the message
+  const reactEmoji = /^\d{15,}$/.test(emoji)
+    ? guild.emojis.cache.get(emoji) ?? emoji
+    : emoji;
+  try {
+    await msg.react(reactEmoji);
+  } catch (err) {
+    return message.reply(`❌ Gagal menambahkan reaksi: ${err.message}`);
+  }
+
+  const added = addReactionRole(guild.id, {
+    messageId,
+    channelId: msg.channelId,
+    emoji,
+    roleId: role.id,
+  });
+
+  if (!added) {
+    return message.reply(`⚠️ Binding untuk emoji **${emojiRaw}** → ${role} **sudah ada**.`);
+  }
+
+  message.reply(`✅ **Reaction role ditambahkan!**\n📌 Pesan: \`${messageId}\`\n🎨 Emoji: ${emojiRaw}\n👤 Role: ${role}`);
+}
+
+async function handleRroleRemove(message, rest) {
+  if (rest.length < 2) {
+    return message.reply('❗ Gunakan: `!rrole remove <messageId> <emoji> [@role]`');
+  }
+
+  const messageId = rest[0];
+  const emojiRaw = rest[1];
+  const roleMention = rest[2];
+  let roleId = null;
+  if (roleMention) {
+    roleId = roleMention.replace(/^<@&/, '').replace(/>$/, '');
+  }
+
+  const emoji = resolveEmojiPrefix(emojiRaw);
+  const removed = removeReactionRole(message.guild.id, messageId, emoji, roleId);
+
+  if (removed === 0) {
+    return message.reply('⚠️ Tidak ada binding yang cocok.');
+  }
+  message.reply(`✅ **${removed}** binding dihapus dari pesan \`${messageId}\` untuk emoji ${emojiRaw}.`);
+}
+
+async function handleRroleRemoveAll(message, rest) {
+  if (rest.length === 0) {
+    return message.reply('❗ Gunakan: `!rrole remove-all <messageId>`');
+  }
+
+  const messageId = rest[0];
+  const removed = removeAllReactionRoles(message.guild.id, messageId);
+
+  if (removed === 0) {
+    return message.reply(`⚠️ Tidak ada reaction role di pesan \`${messageId}\`.`);
+  }
+  message.reply(`✅ **${removed}** binding dihapus dari pesan \`${messageId}\`.`);
+}
+
+async function handleRroleList(message) {
+  const list = getReactionRoles(message.guild.id);
+
+  if (list.length === 0) {
+    return message.reply('📭 Belum ada reaction role di server ini.');
+  }
+
+  // Group by message
+  const byMessage = new Map();
+  for (const entry of list) {
+    if (!byMessage.has(entry.messageId)) byMessage.set(entry.messageId, []);
+    byMessage.get(entry.messageId).push(entry);
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle('📌 Reaction Roles — Server Ini')
+    .setFooter({ text: `${list.length} total binding` })
+    .setTimestamp();
+
+  for (const [msgId, entries] of byMessage) {
+    const lines = entries.map((e) => {
+      const emojiDisplay = /^\d{15,}$/.test(e.emoji)
+        ? `<:custom:${e.emoji}>`
+        : e.emoji;
+      return `${emojiDisplay} → <@&${e.roleId}>`;
+    });
+    embed.addFields({
+      name: `📋 Pesan \`${msgId}\` (${entries.length})`,
+      value: lines.join('\n').slice(0, 1024),
+      inline: false,
+    });
+  }
+
+  message.reply({ embeds: [embed] });
+}
+
+async function handleRroleSetEmoji(message, rest) {
+  if (rest.length < 4) {
+    return message.reply('❗ Gunakan: `!rrole set-emoji <messageId> <oldEmoji> <newEmoji> <@role>`\nContoh: `!rrole set-emoji 123456789012345678 🎨 🖌️ @Artist`');
+  }
+
+  const messageId = rest[0];
+  const oldEmojiRaw = rest[1];
+  const newEmojiRaw = rest[2];
+  const roleMention = rest[3];
+  const roleId = roleMention.replace(/^<@&/, '').replace(/>$/, '');
+  const role = message.guild.roles.cache.get(roleId);
+  if (!role) {
+    return message.reply(`❌ Role tidak ditemukan: ${roleMention}`);
+  }
+
+  const oldEmoji = resolveEmojiPrefix(oldEmojiRaw);
+  const newEmoji = resolveEmojiPrefix(newEmojiRaw);
+
+  // Update storage
+  const updated = updateReactionRoleEmoji(message.guild.id, messageId, oldEmoji, newEmoji, roleId);
+  if (!updated) {
+    return message.reply(`❌ Binding tidak ditemukan: \`${messageId}\` ${oldEmojiRaw} → ${role}`);
+  }
+
+  // Remove old reaction + add new reaction on the message
+  const guild = message.guild;
+  const msg = await findMessageInGuild(guild, messageId, message.channelId);
+  if (msg) {
+    try {
+      const oldReact = /^\d{15,}$/.test(oldEmoji)
+        ? guild.emojis.cache.get(oldEmoji) ?? oldEmoji
+        : oldEmoji;
+      const reactKey = typeof oldReact === 'string' ? oldReact : oldReact.id;
+      const reaction = msg.reactions.cache.get(reactKey);
+      if (reaction) {
+        await reaction.users.remove(message.client.user.id);
+      }
+    } catch { /* ignore */ }
+
+    try {
+      const newReact = /^\d{15,}$/.test(newEmoji)
+        ? guild.emojis.cache.get(newEmoji) ?? newEmoji
+        : newEmoji;
+      await msg.react(newReact);
+    } catch (err) {
+      return message.reply(`⚠️ Binding diupdate, tapi gagal react emoji baru: ${err.message}`);
+    }
+  }
+
+  message.reply(`✅ Emoji diubah: ${oldEmojiRaw} → ${newEmojiRaw} untuk ${role} di pesan \`${messageId}\`.`);
 }

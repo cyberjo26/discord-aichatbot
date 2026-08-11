@@ -10,6 +10,7 @@ import { data as adminData } from './commands/admin.js';
 import { data as pingData } from './commands/ping.js';
 import { data as weatherData } from './commands/weather.js';
 import { data as inviteData } from './commands/invite.js';
+import { data as reactionroleData } from './commands/reactionrole.js';
 
 const commands = [
   askData,
@@ -19,7 +20,8 @@ const commands = [
   adminData,
   pingData,
   weatherData,
-  inviteData
+  inviteData,
+  reactionroleData,
 ].map((cmd) => cmd.toJSON());
 
 const token = process.env.DISCORD_TOKEN;

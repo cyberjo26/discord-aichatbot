@@ -12,6 +12,7 @@ import { initWarnings, addWarning, applyWarningEscalation } from './utils/warnin
 import { hasPendingLearn, addExplanation, completeLearning } from './utils/learned-patterns.js';
 import { initServerSettings, getSetting, forceSaveSettings } from './utils/server-settings.js';
 import { initVoiceMaster, handleVoiceStateUpdate } from './utils/voicemaster.js';
+import { handleReactionAdd, handleReactionRemove } from './utils/reaction-roles.js';
 import { closeDB, initReminders, stopReminderPolling } from './utils/reminders.js';
 import { handleVoiceWelcome } from './voice/welcome.js';
 import { initBackups } from './utils/backup.js';
@@ -27,6 +28,7 @@ import * as adminCmd from './commands/admin.js';
 import * as pingCmd from './commands/ping.js';
 import * as weatherCmd from './commands/weather.js';
 import * as inviteCmd from './commands/invite.js';
+import * as reactionroleCmd from './commands/reactionrole.js';
 
 // Initialize persistent systems
 initPrefs();
@@ -50,12 +52,14 @@ const client = new Client({
   partials: [
     Partials.Message,
     Partials.Channel,
+    Partials.Reaction,
+    Partials.User,
   ],
 });
 
 // Register slash commands in collection
 client.commands = new Collection();
-const commandModules = [askCmd, chatCmd, summarizeCmd, helpCmd, adminCmd, pingCmd, weatherCmd, inviteCmd];
+const commandModules = [askCmd, chatCmd, summarizeCmd, helpCmd, adminCmd, pingCmd, weatherCmd, inviteCmd, reactionroleCmd];
 
 for (const mod of commandModules) {
   client.commands.set(mod.data.name, mod);
@@ -599,6 +603,15 @@ Bahasa Indonesia.`;
   } catch (err) {
     logger.error(`Welcome message failed: ${err.message}`);
   }
+});
+
+// ─── Reaction Roles ─────────────────────────────────────────────────
+client.on('messageReactionAdd', async (reaction, user) => {
+  await handleReactionAdd(reaction, user);
+});
+
+client.on('messageReactionRemove', async (reaction, user) => {
+  await handleReactionRemove(reaction, user);
 });
 
 // ─── Graceful shutdown ─────────────────────────────────────────────

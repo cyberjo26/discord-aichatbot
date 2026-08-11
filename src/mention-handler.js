@@ -13,6 +13,7 @@ import logger from './utils/logger.js';
 import { checkRateLimit, releaseRateLimit } from './utils/rate-limit.js';
 import { recordMetric } from './utils/metrics.js';
 import { handleVoiceResponse } from './utils/voice-response.js';
+import { getSetting } from './utils/server-settings.js';
 
 // Import extracted actions
 import {
@@ -810,6 +811,10 @@ async function handleUpdateLearn(message) {
 // ─── Utility ───────────────────────────────────────────────────────
 
 async function playVoiceIfInChannel(message, text) {
+  if (message.guild && getSetting(message.guild.id, 'autoVoiceRepliesEnabled') === false) {
+    return;
+  }
+
   try {
     await handleVoiceResponse(message.member, text);
   } catch (voiceErr) {

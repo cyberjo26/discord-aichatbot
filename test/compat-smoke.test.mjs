@@ -37,7 +37,7 @@ test('smoke: config exits with error when required env vars are missing', async 
 });
 
 test('smoke: all commands modules expose .data and .execute', async () => {
-  const cmds = ['ask', 'chat', 'summarize', 'help', 'admin', 'ping', 'weather', 'invite'];
+  const cmds = ['ask', 'chat', 'summarize', 'help', 'admin', 'ping', 'weather', 'invite', 'reactionrole'];
   for (const name of cmds) {
     const mod = await import(`../src/commands/${name}.js`);
     assert.ok(mod.data, `/commands/${name}.js must export data`);
@@ -46,12 +46,19 @@ test('smoke: all commands modules expose .data and .execute', async () => {
   }
 });
 
-test('smoke: deploy-commands registers exactly 8 commands', async () => {
+test('smoke: invite requests thread message permission', async () => {
+  const { PermissionFlagsBits } = await import('discord.js');
+  const { getInvitePermissionsBits } = await import('../src/utils/invite-permissions.js');
+  const inviteBits = BigInt(getInvitePermissionsBits());
+  assert.ok((inviteBits & PermissionFlagsBits.SendMessagesInThreads) !== 0n);
+});
+
+test('smoke: deploy-commands registers exactly 9 commands', async () => {
   const { REST, Routes } = await import('discord.js');
-  const files = ['ask', 'chat', 'summarize', 'help', 'admin', 'ping', 'weather', 'invite'];
+  const files = ['ask', 'chat', 'summarize', 'help', 'admin', 'ping', 'weather', 'invite', 'reactionrole'];
   const mods = await Promise.all(files.map((f) => import(`../src/commands/${f}.js`)));
   const commands = mods.map((m) => m.data.toJSON());
-  assert.equal(commands.length, 8);
+  assert.equal(commands.length, 9);
   assert.ok(REST && Routes, 'discord.js REST exports available');
 });
 

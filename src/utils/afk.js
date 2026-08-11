@@ -41,6 +41,8 @@ export function initAfk() {
  * Save AFK entries to disk (debounced)
  */
 function scheduleSave() {
+  // Hermetic test mode: never touch disk or keep the event loop alive
+  if (process.env.TEST_ENV) return;
   if (saveTimeout) clearTimeout(saveTimeout);
   saveTimeout = setTimeout(() => {
     try {
@@ -126,6 +128,7 @@ export function formatAfkSince(setAt) {
  * Force flush to disk (shutdown / crash safety)
  */
 export function forceSaveAfk() {
+  if (process.env.TEST_ENV) return;
   if (saveTimeout) {
     clearTimeout(saveTimeout);
     saveTimeout = null;

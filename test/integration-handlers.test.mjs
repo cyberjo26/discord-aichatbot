@@ -2,11 +2,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mock } from 'node:test';
-import { setupEnv, makeGuild, makeMember, makeMessage, makePermissions } from './helpers.mjs';
+import { setupEnv, makeGuild, makeMember, makeMessage, makePermissions, makeVoiceState } from './helpers.mjs';
 
 setupEnv();
 
-// ─── Mock the AI module before importing the handlers ──────────────
+// ─── Mock the AI and voice modules before importing the handlers ───
+let voiceResponseCalls = 0;
 mock.module('../src/ai/openrouter.js', {
   namedExports: {
     chatCompletion: async (messages, opts) => {
@@ -24,7 +25,18 @@ mock.module('../src/ai/openrouter.js', {
   },
 });
 
+mock.module('../src/utils/voice-response.js', {
+  namedExports: {
+    handleVoiceResponse: async () => {
+      voiceResponseCalls++;
+      return true;
+    },
+  },
+  defaultExport: { handleVoiceResponse: async () => true },
+});
+
 const { handlePrefixCommand } = await import('../src/prefix-handler.js');
+const { setSetting } = await import('../src/utils/server-settings.js');
 const { handleMention } = await import('../src/mention-handler.js');
 
 // Stub global fetch for execPing
@@ -61,6 +73,55 @@ test('prefix: !help replies with embeds', async () => {
   assert.equal(message.replyCalls.length, 1);
   assert.ok(Array.isArray(message.replyCalls[0].embeds));
   assert.ok(message.replyCalls[0].embeds.length >= 3, 'help sends multiple embeds');
+  const prefixFields = message.replyCalls[0].embeds[1].data.fields;
+  assert.ok(prefixFields.some((field) => field.name === '!voice on|off|status'), 'help documents auto voice toggle');
+});
+
+test('prefix: !voice off disables automatic voice replies per server', async () => {
+  const guild = makeGuild({ id: 'voice-toggle-guild' });
+  const message = makeMessage({
+    id: nextMsgId(),
+    content: '!voice off',
+    guild,
+    member: makeMember({ id: 'qa-owner-id' }),
+    authorId: 'qa-owner-id',
+  });
+  let replyText = null;
+  message.reply = async (opts) => {
+    replyText = typeof opts === 'string' ? opts : opts.content;
+    return {};
+  };
+
+  await handlePrefixCommand(message);
+  assert.match(replyText, /NONAKTIF/);
+
+  message.content = '!voice status';
+  await handlePrefixCommand(message);
+  assert.match(replyText, /NONAKTIF/);
+
+  message.content = '!voice on';
+  await handlePrefixCommand(message);
+  assert.match(replyText, /AKTIF/);
+});
+
+test('prefix: !voice rejects non-owner without server management permission', async () => {
+  const guild = makeGuild({ id: 'voice-permission-guild' });
+  const member = makeMember({ id: '111111111111111111' });
+  const message = makeMessage({
+    id: nextMsgId(),
+    content: '!voice off',
+    guild,
+    member,
+    authorId: '111111111111111111',
+  });
+  let replyText = null;
+  message.reply = async (opts) => {
+    replyText = typeof opts === 'string' ? opts : opts.content;
+    return {};
+  };
+
+  await handlePrefixCommand(message);
+  assert.match(replyText, /Manage Server|owner/);
 });
 
 test('prefix: !ask with AI mock replies with answer embed', async () => {
@@ -149,6 +210,25 @@ test('mention: fast-route ping works end-to-end', async () => {
   await handleMention(message);
   assert.ok(message.replyCalls.length >= 1);
   assert.equal(message.replyCalls[0].content, '⏳ Oke, saya periksa dulu...');
+});
+
+test('mention: server voice toggle suppresses automatic voice reply', async () => {
+  const guild = makeGuild({ id: 'auto-voice-off-guild' });
+  const member = makeMember({
+    id: '111111111111111111',
+    displayName: 'User1',
+    voice: makeVoiceState({ channel: { id: 'voice-channel' } }),
+  });
+  setSetting(guild.id, 'autoVoiceRepliesEnabled', false);
+  const message = makeMessage({ id: nextMsgId(), content: '<@bot-id> halo apa kabar?', guild, member });
+  message.reply = async (opts) => {
+    message.replyCalls.push(typeof opts === 'string' ? { content: opts } : opts);
+    return { id: 'r', edit: async () => {}, delete: async () => {}, awaitMessageComponent: async () => { throw new Error('timeout'); } };
+  };
+  message.replyCalls = [];
+  const before = voiceResponseCalls;
+  await handleMention(message);
+  assert.equal(voiceResponseCalls, before, 'automatic voice reply must stay disabled');
 });
 
 test('mention: plain chat routes to AI (no action)', async () => {
