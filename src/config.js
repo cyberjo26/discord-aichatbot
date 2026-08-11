@@ -39,6 +39,7 @@ const config = {
 
   // Channel IDs (opsional)
   welcomeChannelId: process.env.WELCOME_CHANNEL_ID || null,   // Channel untuk welcome member baru
+  welcomeFallbackImage: process.env.WELCOME_FALLBACK_IMAGE || null, // Default image for welcome embeds
   announceChannelId: process.env.ANNOUNCE_CHANNEL_ID || null,  // Channel default untuk announcement
   modLogChannelId: process.env.MOD_LOG_CHANNEL_ID || null,     // Channel untuk alert moderasi manual (auto-kick gagal)
 

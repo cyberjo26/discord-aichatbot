@@ -6,7 +6,8 @@ import config from '../config.js';
 import logger from '../utils/logger.js';
 import { getMetrics } from '../utils/metrics.js';
 import { healthCheck } from '../utils/health.js';
-import { getSetting, setSetting } from '../utils/server-settings.js';
+import { getSetting, setSetting, removeSetting } from '../utils/server-settings.js';
+import { isHttpUrl } from '../utils/welcome-embed.js';
 
 export const data = new SlashCommandBuilder()
   .setName('admin')
@@ -63,6 +64,35 @@ export const data = new SlashCommandBuilder()
           .setDescription('true = aktifkan, false = matikan. Kosongkan untuk cek status.')
           .setRequired(false)
       )
+  )
+  .addSubcommand((sub) =>
+    sub
+      .setName('welcome')
+      .setDescription('Atur welcome embed server')
+      .addChannelOption((opt) =>
+        opt
+          .setName('channel')
+          .setDescription('Channel tujuan welcome')
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+      )
+      .addStringOption((opt) =>
+        opt.setName('title').setDescription('Judul; placeholder: {user}, {server}')
+      )
+      .addStringOption((opt) =>
+        opt.setName('message').setDescription('Pesan; placeholder: {mention}, {user}, {server}')
+      )
+      .addStringOption((opt) =>
+        opt.setName('image').setDescription('URL gambar http/https')
+      )
+      .addBooleanOption((opt) =>
+        opt.setName('enabled').setDescription('Aktifkan atau matikan welcome embed')
+      )
+      .addBooleanOption((opt) =>
+        opt.setName('status').setDescription('Lihat konfigurasi welcome saat ini')
+      )
+      .addBooleanOption((opt) =>
+        opt.setName('reset').setDescription('Hapus konfigurasi custom welcome')
+      )
   );
 
 export async function execute(interaction) {
@@ -87,6 +117,8 @@ export async function execute(interaction) {
       return handleVoice(interaction);
     case 'voice-welcome':
       return handleVoiceWelcomeToggle(interaction);
+    case 'welcome':
+      return handleWelcomeConfig(interaction);
   }
 }
 
@@ -237,6 +269,71 @@ async function handleVoice(interaction) {
   }
 
   await interaction.reply({ embeds: [embed], ephemeral: true });
+}
+
+async function handleWelcomeConfig(interaction) {
+  const guildId = interaction.guildId;
+  if (!guildId) {
+    return interaction.reply({ content: '❌ Perintah ini hanya bisa digunakan di server.', ephemeral: true });
+  }
+
+  const options = interaction.options;
+  const status = options.getBoolean('status');
+  const reset = options.getBoolean('reset');
+
+  if (reset) {
+    for (const key of ['welcomeChannelId', 'welcomeTitle', 'welcomeMessage', 'welcomeImage', 'welcomeEnabled']) {
+      removeSetting(guildId, key);
+    }
+    logger.info(`Owner ${interaction.user.tag} reset welcome config for guild ${guildId}`);
+    return interaction.reply({ content: '✅ Konfigurasi welcome direset ke default.', ephemeral: true });
+  }
+
+  if (status) {
+    const channelId = getSetting(guildId, 'welcomeChannelId');
+    const enabled = getSetting(guildId, 'welcomeEnabled') !== false;
+    const image = getSetting(guildId, 'welcomeImage') || config.welcomeFallbackImage || 'Tidak ada';
+    const title = getSetting(guildId, 'welcomeTitle') || '(default)';
+    const message = getSetting(guildId, 'welcomeMessage') || '(default)';
+    return interaction.reply({
+      content: [
+        `**Welcome:** ${enabled ? '🟢 AKTIF' : '🔴 NONAKTIF'}`,
+        `**Channel:** ${channelId ? `<#${channelId}>` : 'System channel / .env'}`,
+        `**Title:** ${title}`,
+        `**Message:** ${message}`,
+        `**Image:** ${image}`,
+      ].join('\\n').slice(0, 1900),
+      ephemeral: true,
+    });
+  }
+
+  const channel = options.getChannel('channel');
+  const title = options.getString('title');
+  const message = options.getString('message');
+  const image = options.getString('image');
+  const enabled = options.getBoolean('enabled');
+  let updated = 0;
+
+  if (channel) { setSetting(guildId, 'welcomeChannelId', channel.id); updated++; }
+  if (title !== null) { setSetting(guildId, 'welcomeTitle', title); updated++; }
+  if (message !== null) { setSetting(guildId, 'welcomeMessage', message); updated++; }
+  if (image !== null) {
+    if (!isHttpUrl(image)) {
+      return interaction.reply({ content: '❌ Image harus berupa URL http:// atau https://.', ephemeral: true });
+    }
+    setSetting(guildId, 'welcomeImage', image); updated++;
+  }
+  if (enabled !== null) { setSetting(guildId, 'welcomeEnabled', enabled); updated++; }
+
+  if (updated === 0) {
+    return interaction.reply({
+      content: '⚠️ Tidak ada perubahan. Isi opsi atau gunakan `status: true`.',
+      ephemeral: true,
+    });
+  }
+
+  logger.info(`Owner ${interaction.user.tag} updated welcome config (${updated}) for guild ${guildId}`);
+  return interaction.reply({ content: `✅ ${updated} pengaturan welcome diperbarui.`, ephemeral: true });
 }
 
 async function handleVoiceWelcomeToggle(interaction) {

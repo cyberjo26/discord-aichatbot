@@ -24,7 +24,8 @@ import { getHistory, addMessage, clearHistory } from './utils/memory.js';
 import { isOwner } from './utils/permissions.js';
 import { parseDuration, formatDuration } from './utils/reminders.js';
 import { addWarning, applyWarningEscalation } from './utils/warnings.js';
-import { getSetting, setSetting } from './utils/server-settings.js';
+import { getSetting, setSetting, removeSetting } from './utils/server-settings.js';
+import { isHttpUrl, WELCOME_TITLE_MAX, WELCOME_MESSAGE_MAX } from './utils/welcome-embed.js';
 import { isAfk, setAfk, clearAfk, getAfk, formatAfkSince } from './utils/afk.js';
 import config from './config.js';
 import logger from './utils/logger.js';
@@ -67,6 +68,10 @@ export async function handlePrefixCommand(message) {
 
     case 'help':
       return handleHelp(message);
+
+    case 'welcome':
+    case 'admin-welcome':
+      return handleWelcomeConfig(message, args);
 
     case 'voice':
       return handleVoiceToggle(message, args);
@@ -292,6 +297,7 @@ async function handleHelp(message) {
       { name: '!afk [alasan]', value: 'Set status AFK (cth: `!afk tidur`). `!afk off` untuk hapus' },
       { name: '🧠 AFK natural', value: 'Bot auto-detect kalimat AFK, cth: `gw afk dulu mau makan` / `im going afk for dinner`' },
       { name: '!help', value: 'Panduan ini' },
+      { name: '!welcome status|on|off|reset', value: 'Atur welcome embed (Owner). Channel: `!welcome channel #welcome` atau `!welcome channel 123456789012345678`. Message mention: `@{user}`. Subcommand: `title`, `message`, `image`' },
       { name: '!voice on|off|status', value: 'Aktifkan/nonaktifkan auto voice reply saat ngobrol dengan `@bot` (Admin/Owner)' },
       { name: '!cvoice [nama/ID channel]', value: 'Cek member di voice channel & statusnya (Mute, Deafen, Live)' },
       { name: '🔒 Moderasi (Admin/Mod Only)', value: 
@@ -303,7 +309,7 @@ async function handleHelp(message) {
         '`!prune <jumlah>` — Hapus pesan di channel (1-100)\n' +
         '`!cn <@user/nama> <nickname baru>` — Ganti nickname user'
       },
-      { name: '🔒 Admin Commands (Owner Only)', value: '`!admin-voice` `!admin-say` `!admin-status`\n`!admin-execute` `!admin-model` `!admin-clear`\n`!admin-voicewelcome on|off|toggle` — Toggle sapaan suara di voice channel\n`!act <channel id> <pesan>` — Kirim pesan sebagai bot ke channel mana pun (tag: `@username` / `@userID` / `<@userID>` jadi mention asli)' },
+      { name: '🔒 Admin Commands (Owner Only)', value: '`!admin-voice` `!admin-say` `!admin-status`\n`!admin-execute` `!admin-model` `!admin-clear`\n`!admin-voicewelcome on|off|toggle` — Toggle sapaan suara di voice channel\n`!welcome status|on|off|reset` — Atur welcome embed; alias: `!admin-welcome`\n`!act <channel id> <pesan>` — Kirim pesan sebagai bot ke channel mana pun (tag: `@username` / `@userID` / `<@userID>` jadi mention asli)' },
     )
     .setFooter({ text: `${config.botName} • Prefix Commands` });
 
@@ -348,6 +354,105 @@ async function handleHelp(message) {
     .setFooter({ text: `${config.botName} • Jarvis Mode` });
 
   await message.reply({ embeds: [helpEmbed, prefixEmbed, jarvisEmbed] });
+}
+
+// ─── !welcome / !admin-welcome ─────────────────────────────────────
+// Owner-only welcome embed configuration.
+// Usage: !welcome status|on|off|reset
+//        !welcome channel #channel
+//        !welcome title <text>
+//        !welcome message <text>
+//        !welcome image <http(s)://url>
+
+async function handleWelcomeConfig(message, args) {
+  if (!message.guild) return message.reply('❌ Hanya bisa dipakai di server.');
+  if (!isOwner(message.author.id)) return message.reply('🔒 Owner only.');
+
+  const input = (args || '').trim();
+  const spaceIdx = input.indexOf(' ');
+  const sub = (spaceIdx === -1 ? input : input.slice(0, spaceIdx)).toLowerCase();
+  const value = spaceIdx === -1 ? '' : input.slice(spaceIdx + 1).trim();
+  const guildId = message.guild.id;
+
+  if (!sub || sub === 'status') {
+    const channelId = getSetting(guildId, 'welcomeChannelId');
+    const enabled = getSetting(guildId, 'welcomeEnabled') !== false;
+    const image = getSetting(guildId, 'welcomeImage') || config.welcomeFallbackImage || 'Tidak ada';
+    return message.reply([
+      `**Welcome:** ${enabled ? 'AKTIF' : 'NONAKTIF'}`,
+      `**Channel:** ${channelId ? `<#${channelId}>` : 'System channel / .env'}`,
+      `**Title:** ${getSetting(guildId, 'welcomeTitle') || '(default)'}`,
+      `**Message:** ${getSetting(guildId, 'welcomeMessage') || '(default)'}`,
+      `**Image:** ${image}`,
+      'Usage: `!welcome on|off|reset`, `!welcome channel #channel|CHANNEL_ID`, `!welcome title <text>`, `!welcome message <text>`, `!welcome image <url>`',
+    ].join('\\n').slice(0, 1900));
+  }
+
+  if (sub === 'reset') {
+    for (const key of ['welcomeChannelId', 'welcomeTitle', 'welcomeMessage', 'welcomeImage', 'welcomeEnabled']) {
+      removeSetting(guildId, key);
+    }
+    return message.reply('✅ Konfigurasi welcome direset ke default.');
+  }
+
+  if (['on', 'off'].includes(sub)) {
+    setSetting(guildId, 'welcomeEnabled', sub === 'on');
+    return message.reply(`✅ Welcome embed sekarang: **${sub === 'on' ? 'AKTIF' : 'NONAKTIF'}**`);
+  }
+
+  if (!value) {
+    return message.reply('❗ Isi nilai konfigurasi. Gunakan `!welcome status` untuk melihat contoh.');
+  }
+
+  if (sub === 'channel') {
+    const channelId = value.match(/^<#(\d+)>$/)?.[1] || (/^\d+$/.test(value) ? value : null);
+    const channelName = value.replace(/^#/, '').trim().toLowerCase();
+    let channel = channelId
+      ? message.guild.channels.cache.get(channelId)
+      : message.guild.channels.cache.find((candidate) => candidate.name?.toLowerCase() === channelName);
+
+    // Cache may be partial after restart. Numeric IDs use direct Discord fetch;
+    // names use a full guild-channel fetch fallback.
+    if (!channel && typeof message.guild.channels.fetch === 'function') {
+      try {
+        if (channelId) {
+          channel = await message.guild.channels.fetch(channelId);
+        } else {
+          const fetchedChannels = await message.guild.channels.fetch();
+          channel = fetchedChannels?.find((candidate) => candidate.name?.toLowerCase() === channelName);
+        }
+      } catch (err) {
+        logger.debug(`!welcome: channel lookup failed: ${err.message}`);
+      }
+    }
+
+    if (!channel) {
+      return message.reply(
+        `❌ Channel ${channelId ? `ID \`${channelId}\`` : `\`${value}\``} tidak ditemukan di server ini.`
+      );
+    }
+
+    if (![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type)) {
+      return message.reply('❌ Channel ditemukan, tapi bukan channel teks atau announcement.');
+    }
+    setSetting(guildId, 'welcomeChannelId', channel.id);
+    return message.reply(`✅ Welcome channel: <#${channel.id}>`);
+  }
+
+  if (sub === 'image') {
+    if (!isHttpUrl(value)) return message.reply('❌ Image harus berupa URL http:// atau https://.');
+    setSetting(guildId, 'welcomeImage', value.slice(0, 2000));
+    return message.reply('✅ Welcome image diperbarui.');
+  }
+
+  if (sub === 'title' || sub === 'message') {
+    const key = sub === 'title' ? 'welcomeTitle' : 'welcomeMessage';
+    const max = sub === 'title' ? WELCOME_TITLE_MAX : WELCOME_MESSAGE_MAX;
+    setSetting(guildId, key, value.slice(0, max));
+    return message.reply(`✅ Welcome ${sub} diperbarui.`);
+  }
+
+  return message.reply('❗ Usage: `!welcome status|on|off|reset`, `channel #channel|CHANNEL_ID`, `title <text>`, `message <text>`, `image <url>`');
 }
 
 // ─── !voice ────────────────────────────────────────────────────────

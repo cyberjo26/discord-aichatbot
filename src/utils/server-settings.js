@@ -122,6 +122,10 @@ export function getAllSettings(guildId) {
   const guildSettings = settings[guildId] || {};
   return {
     welcomeChannelId: guildSettings.welcomeChannelId || config.welcomeChannelId || null,
+    welcomeEnabled: guildSettings.welcomeEnabled !== undefined ? guildSettings.welcomeEnabled : true,
+    welcomeTitle: guildSettings.welcomeTitle || null,
+    welcomeMessage: guildSettings.welcomeMessage || null,
+    welcomeImage: guildSettings.welcomeImage || config.welcomeFallbackImage || null,
     announceChannelId: guildSettings.announceChannelId || config.announceChannelId || null,
     voicemasterHubId: guildSettings.voicemasterHubId || null,
     autoVoiceRepliesEnabled:

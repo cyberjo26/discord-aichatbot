@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mock } from 'node:test';
-import { setupEnv, makeGuild, makeMember, makeMessage, makePermissions, makeVoiceState } from './helpers.mjs';
+import { setupEnv, makeGuild, makeMember, makeMessage, makePermissions, makeVoiceState, makeChannel, MockCollection } from './helpers.mjs';
 
 setupEnv();
 
@@ -75,6 +75,59 @@ test('prefix: !help replies with embeds', async () => {
   assert.ok(message.replyCalls[0].embeds.length >= 3, 'help sends multiple embeds');
   const prefixFields = message.replyCalls[0].embeds[1].data.fields;
   assert.ok(prefixFields.some((field) => field.name === '!voice on|off|status'), 'help documents auto voice toggle');
+});
+
+test('prefix: !welcome configures persistent welcome embed settings', async () => {
+  const welcomeChannel = makeChannel({ id: 'welcome-channel', name: 'welcome' });
+  const guild = makeGuild({ id: 'welcome-prefix-guild', channels: [welcomeChannel] });
+  const owner = makeMember({ id: 'qa-owner-id', displayName: 'Owner' });
+  const message = makeMessage({
+    id: nextMsgId(),
+    content: '!welcome title Welcome {user}',
+    guild,
+    member: owner,
+    authorId: 'qa-owner-id',
+  });
+  let replyText = null;
+  message.reply = async (opts) => {
+    replyText = typeof opts === 'string' ? opts : opts.content;
+    return {};
+  };
+
+  await handlePrefixCommand(message);
+  assert.match(replyText, /diperbarui/);
+
+  message.content = '!welcome channel #welcome';
+  await handlePrefixCommand(message);
+  assert.match(replyText, /<#welcome-channel>/);
+
+  message.content = '!welcome status';
+  await handlePrefixCommand(message);
+
+  const uncachedChannel = makeChannel({ id: '1300280370867998720', name: 'uncached' });
+  guild.channels.cache = new MockCollection();
+  guild.channels.fetch = async (channelId) => {
+    if (channelId === '1300280370867998720') return uncachedChannel;
+    return new MockCollection([[uncachedChannel.id, uncachedChannel]]);
+  };
+  message.content = '!welcome channel #uncached';
+  await handlePrefixCommand(message);
+  assert.match(replyText, /<#1300280370867998720>/);
+
+  message.content = '!welcome channel 1300280370867998720';
+  await handlePrefixCommand(message);
+  assert.match(replyText, /<#1300280370867998720>/);
+
+  message.content = '!welcome status';
+  await handlePrefixCommand(message);
+  assert.match(replyText, /Welcome \{user\}/);
+
+  const outsider = makeMember({ id: 'not-owner' });
+  message.author.id = 'not-owner';
+  message.member = outsider;
+  message.content = '!welcome off';
+  await handlePrefixCommand(message);
+  assert.match(replyText, /Owner only/);
 });
 
 test('prefix: !voice off disables automatic voice replies per server', async () => {

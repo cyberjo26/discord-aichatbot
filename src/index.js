@@ -3,7 +3,6 @@ import config from './config.js';
 import logger from './utils/logger.js';
 import { handlePrefixCommand } from './prefix-handler.js';
 import { handleMention } from './mention-handler.js';
-import { chatCompletion } from './ai/openrouter.js';
 import { initPrefs, forceSavePrefs } from './utils/user-prefs.js';
 import { initAfk, handleAfkMessageEvent, clearAfk, isAfk, forceSaveAfk } from './utils/afk.js';
 import { initWakeSleep, isBotAwake } from './utils/wake-sleep.js';
@@ -18,6 +17,7 @@ import { handleVoiceWelcome } from './voice/welcome.js';
 import { initBackups } from './utils/backup.js';
 import { checkRateLimit, cleanupRateLimits, releaseRateLimit } from './utils/rate-limit.js';
 import { healthCheck } from './utils/health.js';
+import { buildWelcomeEmbed } from './utils/welcome-embed.js';
 
 // Import commands
 import * as askCmd from './commands/ask.js';
@@ -576,30 +576,37 @@ client.on('guildMemberAdd', async (member) => {
     const settingsWelcome = getSetting(member.guild.id, 'welcomeChannelId');
     if (settingsWelcome) {
       channel = member.guild.channels.cache.get(settingsWelcome);
+      if (!channel && typeof member.guild.channels.fetch === 'function') {
+        channel = await member.guild.channels.fetch(settingsWelcome).catch((err) => {
+          logger.debug(`Welcome channel lookup failed for ${settingsWelcome}: ${err.message}`);
+          return null;
+        });
+      }
     }
     if (!channel && config.welcomeChannelId) {
       channel = member.guild.channels.cache.get(config.welcomeChannelId);
+      if (!channel && typeof member.guild.channels.fetch === 'function') {
+        channel = await member.guild.channels.fetch(config.welcomeChannelId).catch((err) => {
+          logger.debug(`Fallback welcome channel lookup failed for ${config.welcomeChannelId}: ${err.message}`);
+          return null;
+        });
+      }
     }
     if (!channel) {
       channel = member.guild.systemChannel;
     }
     if (!channel) return;
 
-    // Generate a natural welcome message with AI
-    const prompt = `Kamu adalah ${config.botName}, bot asisten di server Discord "${member.guild.name}".
-Seseorang bernama "${member.displayName}" baru saja bergabung ke server.
-Buatkan pesan sambutan yang hangat, friendly, dan singkat (2-3 kalimat).
-Tag user dengan <@${member.id}>.
-Jangan terlalu formal. Gunakan emoji yang sesuai.
-Bahasa Indonesia.`;
+    if (getSetting(member.guild.id, 'welcomeEnabled') === false) return;
 
-    const welcome = await chatCompletion(
-      [{ role: 'system', content: prompt }, { role: 'user', content: 'Buat sambutan.' }],
-      { maxTokens: 150 }
-    );
+    const embed = buildWelcomeEmbed(member, {
+      title: getSetting(member.guild.id, 'welcomeTitle'),
+      message: getSetting(member.guild.id, 'welcomeMessage'),
+      image: getSetting(member.guild.id, 'welcomeImage') || config.welcomeFallbackImage,
+    });
 
-    await channel.send(welcome);
-    logger.info(`👋 Welcome message sent for ${member.displayName}`);
+    await channel.send({ embeds: [embed] });
+    logger.info(`👋 Welcome embed sent for ${member.displayName}`);
   } catch (err) {
     logger.error(`Welcome message failed: ${err.message}`);
   }

@@ -121,6 +121,7 @@ Commands are defined in `src/commands/` and registered with `npm run deploy-comm
 | `/admin set-model <model>` | Owner-only temporary OpenRouter model change. |
 | `/admin voice` | Owner-only voice-channel occupancy report. |
 | `/admin voice-welcome [enabled]` | Owner-only voice welcome status/toggle. |
+| `/admin welcome` | Owner-only welcome embed setup: channel, title, message, image URL, enable/disable, status, and reset. |
 
 The remaining `/admin` subcommands require the configured owner account. `/reactionrole` requires the Discord **Manage Roles** permission.
 
@@ -133,12 +134,24 @@ Prefix commands use `!` and are handled by `src/prefix-handler.js`.
 | Conversation | `!ask <question>`, `!ask-voice <question>`, `!chat <message>`, `!chat-voice <message>`, `!summarize <url>`, `!help` |
 | AFK | `!afk [reason]`, `!afk off` |
 | Voice | `!cvoice [channel]`, `!voice on\|off\|status`, `!admin-voice`, `!admin-voicewelcome on\|off\|toggle` |
+| Welcome | `!welcome status`, `!welcome on\|off`, `!welcome reset`, `!welcome channel #channel` or `!welcome channel CHANNEL_ID`, `!welcome title <text>`, `!welcome message <text>`, `!welcome image <http(s)://url>`; alias `!admin-welcome` |
 | Moderation | `!warn`, `!bungkam`, `!kick`, `!dc`, `!to`, `!prune`, `!cn` |
-| Owner | `!admin-say`, `!admin-status`, `!admin-execute`, `!admin-model`, `!admin-clear`, `!act` |
+| Owner | `!admin-say`, `!admin-status`, `!admin-execute`, `!admin-model`, `!admin-clear`, `!welcome`, `!admin-welcome`, `!act` |
 | Utilities | `!ping`, `!weather` / `!cuaca`, `!invite` / `!undang` |
 | Reaction roles | `!rrole setup`, `!rrole add`, `!rrole remove`, `!rrole remove-all`, `!rrole list`, `!rrole set-emoji` |
 
-Exact arguments and permission checks are implemented in `src/prefix-handler.js`. Natural-language mentions can also trigger supported actions such as moderation, reminders, voice controls, configuration, and utility operations. For exact arguments, start with `/help` or inspect the action handlers in `src/actions/`.
+Exact arguments and permission checks are implemented in `src/prefix-handler.js`. `!welcome` is owner-only and configures persistent welcome embeds; placeholders `{mention}`, `{user}`, `@{user}`, and `{server}` work in title/message. `@{user}` becomes an in-embed Discord mention; no separate tag is sent outside embed. Embed-only mentions can be clickable without triggering a Discord notification; use normal message content if notification is required. Natural-language mentions can also trigger supported actions such as moderation, reminders, voice controls, configuration, and utility operations. For exact arguments, start with `/help` or inspect the action handlers in `src/actions/`.
+
+Welcome example:
+
+```text
+!welcome channel #welcome
+!welcome message Selamat datang @{user} di server Testing Cyberjo. Baca ⚖️rules terlebih dahulu dan ambil jabatan dengan menekan tombol reaksi.
+!welcome image https://example.com/welcome.png
+!welcome on
+```
+
+`!welcome channel` accepts channel name (`#welcome`), numeric Channel ID, or Discord channel mention (`<#123456789012345678>`). Welcome title/message text is compacted to fit alongside the image. `WELCOME_FALLBACK_IMAGE` provides an optional default image when no per-server image is configured.
 
 ### Natural-language examples
 
@@ -249,6 +262,7 @@ The complete annotated template is available in [`.env.example`](.env.example). 
 | `BOT_NAME` | `AI Bot` | Display name used in prompts and embeds. |
 | `TIMEZONE` | `Asia/Bangkok` | Timezone used by reminders and scheduled behavior. |
 | `WELCOME_CHANNEL_ID` | — | Optional fallback welcome channel. |
+| `WELCOME_FALLBACK_IMAGE` | — | Optional default `http://` or `https://` image for welcome embeds; per-server `/admin welcome image` overrides it. |
 | `ANNOUNCE_CHANNEL_ID` | — | Optional announcement channel. |
 | `MOD_LOG_CHANNEL_ID` | — | Optional moderation log channel. |
 
