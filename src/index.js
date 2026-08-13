@@ -18,17 +18,10 @@ import { initBackups } from './utils/backup.js';
 import { checkRateLimit, cleanupRateLimits, releaseRateLimit } from './utils/rate-limit.js';
 import { healthCheck } from './utils/health.js';
 import { buildWelcomeEmbed } from './utils/welcome-embed.js';
+import { registerCommands } from './deploy-commands.js';
 
-// Import commands
-import * as askCmd from './commands/ask.js';
-import * as chatCmd from './commands/chat.js';
-import * as summarizeCmd from './commands/summarize.js';
-import * as helpCmd from './commands/help.js';
-import * as adminCmd from './commands/admin.js';
-import * as pingCmd from './commands/ping.js';
-import * as weatherCmd from './commands/weather.js';
-import * as inviteCmd from './commands/invite.js';
-import * as reactionroleCmd from './commands/reactionrole.js';
+// Import commands (centralized registry — add new commands in src/commands/index.js)
+import { commandModules } from './commands/index.js';
 
 // Initialize persistent systems
 initPrefs();
@@ -59,7 +52,6 @@ const client = new Client({
 
 // Register slash commands in collection
 client.commands = new Collection();
-const commandModules = [askCmd, chatCmd, summarizeCmd, helpCmd, adminCmd, pingCmd, weatherCmd, inviteCmd, reactionroleCmd];
 
 for (const mod of commandModules) {
   client.commands.set(mod.data.name, mod);
@@ -136,6 +128,14 @@ client.once('ready', async () => {
   } else {
     client.user.setActivity('💤 Sleeping...', { type: 0 });
     client.user.setStatus('idle');
+  }
+
+  // Auto-register slash commands globally so every server the bot is in has them.
+  try {
+    const deploy = await registerCommands();
+    logger.info(`   Slash commands: ${deploy.count} registered globally${deploy.guildId ? ` + guild ${deploy.guildId} (instant)` : ''}`);
+  } catch (err) {
+    logger.error(`Slash command registration failed: ${err.message}`);
   }
 
   // Initialize VoiceMaster system

@@ -97,7 +97,7 @@ The router provides:
 
 ### Slash commands
 
-Commands are defined in `src/commands/` and registered with `npm run deploy-commands`.
+Commands are defined in `src/commands/` and registered centrally in `src/commands/index.js`. They are deployed globally and re-registered automatically on startup, so every server the bot is in gets them. `npm run deploy-commands` is still available for manual deployment without restarting.
 
 | Command | Description |
 |---|---|
@@ -134,13 +134,13 @@ Prefix commands use `!` and are handled by `src/prefix-handler.js`.
 | Conversation | `!ask <question>`, `!ask-voice <question>`, `!chat <message>`, `!chat-voice <message>`, `!summarize <url>`, `!help` |
 | AFK | `!afk [reason]`, `!afk off` |
 | Voice | `!cvoice [channel]`, `!voice on\|off\|status`, `!admin-voice`, `!admin-voicewelcome on\|off\|toggle` |
-| Welcome | `!welcome status`, `!welcome on\|off`, `!welcome reset`, `!welcome channel #channel` or `!welcome channel CHANNEL_ID`, `!welcome title <text>`, `!welcome message <text>`, `!welcome image <http(s)://url>`; alias `!admin-welcome` |
+| Welcome | `!welcome status`, `!welcome preview`, `!welcome on\|off`, `!welcome reset`, `!welcome channel #channel` or `!welcome channel CHANNEL_ID`, `!welcome title <text>`, `!welcome message <text>`, `!welcome image <http(s)://url>`; alias `!admin-welcome` |
 | Moderation | `!warn`, `!bungkam`, `!kick`, `!dc`, `!to`, `!prune`, `!cn` |
 | Owner | `!admin-say`, `!admin-status`, `!admin-execute`, `!admin-model`, `!admin-clear`, `!welcome`, `!admin-welcome`, `!act` |
 | Utilities | `!ping`, `!weather` / `!cuaca`, `!invite` / `!undang` |
 | Reaction roles | `!rrole setup`, `!rrole add`, `!rrole remove`, `!rrole remove-all`, `!rrole list`, `!rrole set-emoji` |
 
-Exact arguments and permission checks are implemented in `src/prefix-handler.js`. `!welcome` is owner-only and configures persistent welcome embeds; placeholders `{mention}`, `{user}`, `@{user}`, and `{server}` work in title/message. `@{user}` becomes an in-embed Discord mention; no separate tag is sent outside embed. Embed-only mentions can be clickable without triggering a Discord notification; use normal message content if notification is required. Natural-language mentions can also trigger supported actions such as moderation, reminders, voice controls, configuration, and utility operations. For exact arguments, start with `/help` or inspect the action handlers in `src/actions/`.
+Exact arguments and permission checks are implemented in `src/prefix-handler.js`. `!welcome` is owner-only and configures persistent welcome embeds; `!welcome preview` sends the currently saved embed configuration in the command channel without changing settings or waiting for a new member. Preview substitutes the command issuer as sample member. Placeholders `{mention}`, `{user}`, `@{user}`, and `{server}` work in title/message. `@{user}` becomes an in-embed Discord mention; no separate tag is sent outside embed. Embed-only mentions can be clickable without triggering a Discord notification; use normal message content if notification is required. Natural-language mentions can also trigger supported actions such as moderation, reminders, voice controls, configuration, and utility operations. For exact arguments, start with `/help` or inspect the action handlers in `src/actions/`.
 
 Welcome example:
 
@@ -214,12 +214,9 @@ OPENROUTER_API_KEY=your_openrouter_key
 
 You can use Gemini, Groq, or Cerebras instead of OpenRouter. Only one of those four required provider keys is needed to pass startup validation.
 
-Register slash commands and start the bot:
+Start the bot (slash commands are registered automatically on startup):
 
 ```bash
-# Guild deployment: set GUILD_ID in .env for near-instant development updates
-npm run deploy-commands
-
 # Development with Node's file watcher
 npm run dev
 
@@ -344,8 +341,9 @@ src/
 ├── config.js                Environment parsing and runtime defaults
 ├── mention-handler.js       Jarvis mode, routing, learning, natural-language actions
 ├── prefix-handler.js        ! commands and prefix-based management
-├── deploy-commands.js       Slash-command registration
+├── deploy-commands.js       Slash-command registration (auto-run on startup + CLI)
 ├── commands/                Slash-command definitions and executors
+│   └── index.js             Central command registry (single source of truth)
 ├── actions/                 Reusable moderation, voice, memory, summary, utility actions
 ├── ai/
 │   ├── router.js             Provider rotation, failover, circuit breakers, metrics
@@ -405,12 +403,12 @@ The test suite covers the provider router, input sanitizer, security helpers, le
 ## Development notes
 
 - Keep secrets in `.env`; never commit tokens or API keys.
-- Run `npm run deploy-commands` after changing slash-command definitions.
-- Use `GUILD_ID` during development so command changes appear quickly.
+- Slash commands are registered automatically on startup; run `npm run deploy-commands` to deploy manually without restarting.
+- Set `GUILD_ID` during development so command changes also apply to that guild instantly.
 - Use a persistent `data/` volume in production.
 - Grant only the Discord permissions needed by the features enabled on your server.
 - When adding a provider, implement the adapter and register it in `src/ai/router.js` and `src/config.js`.
-- When adding a command, update both `src/deploy-commands.js` and the command collection in `src/index.js`.
+- When adding a command, add it to the list in `src/commands/index.js` — runtime registration and deployment both read from there.
 
 ## Contributing
 
@@ -433,4 +431,4 @@ This repository does not currently include a `LICENSE` file or an explicit licen
 
 Bot ini adalah asisten Discord AI multifungsi dengan **Jarvis Mode**, chat dan tanya jawab, pencarian web dengan sumber, voice/TTS, moderasi, AFK, reminder SQLite, self-learning, VoiceMaster, reaction roles, dan routing AI multi-provider dengan failover otomatis.
 
-Jalankan dengan menyalin `.env.example` ke `.env`, isi `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, dan minimal satu API key AI (`OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, atau `CEREBRAS_API_KEY`), lalu jalankan `npm run deploy-commands` dan `npm start`.
+Jalankan dengan menyalin `.env.example` ke `.env`, isi `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, dan minimal satu API key AI (`OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, atau `CEREBRAS_API_KEY`), lalu jalankan `npm start` (command slash didaftarkan otomatis saat startup).

@@ -3,6 +3,7 @@
 // (detectAfkIntent) with reason extraction and false-positive rejection.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mock } from 'node:test';
 import { setupEnv } from './helpers.mjs';
 
 setupEnv();
@@ -15,6 +16,7 @@ const {
   formatAfkSince,
   buildAfkNotice,
   detectAfkIntent,
+  sendTempMessage,
 } = await import('../src/utils/afk.js');
 
 // ─── detectAfkIntent: natural-language AFK statements ──────────────
@@ -108,4 +110,55 @@ test('buildAfkNotice: mentions user + reason when AFK, null otherwise', () => {
   assert.ok(notice.includes('<@u-notice-1>'));
   assert.ok(notice.includes('makan'));
   assert.ok(notice.includes('AFK'));
+});
+
+// ─── sendTempMessage: auto-delete after 3s ─────────────────────────
+test('sendTempMessage: replies and auto-deletes after 3s', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let deleted = 0;
+    const sent = { delete: async () => { deleted++; } };
+    const message = { reply: async () => sent, channel: { send: async () => sent } };
+
+    const result = await sendTempMessage(message, { text: 'halo', reply: true });
+
+    assert.equal(result, sent);
+    assert.equal(deleted, 0, 'not deleted before ttl');
+    mock.timers.tick(3000);
+    await Promise.resolve();
+    assert.equal(deleted, 1, 'deleted exactly once after 3s');
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('sendTempMessage: uses channel.send when reply is false', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let deleted = 0;
+    const sent = { delete: async () => { deleted++; } };
+    let channelSends = 0;
+    let replies = 0;
+    const message = {
+      reply: async () => { replies++; return sent; },
+      channel: { send: async () => { channelSends++; return sent; } },
+    };
+
+    const result = await sendTempMessage(message, { text: 'halo' });
+
+    assert.equal(result, sent);
+    assert.equal(channelSends, 1, 'channel.send called');
+    assert.equal(replies, 0, 'reply not called');
+    mock.timers.tick(3000);
+    await Promise.resolve();
+    assert.equal(deleted, 1);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('sendTempMessage: returns null when send fails', async () => {
+  const message = { reply: async () => { throw new Error('no perms'); } };
+  const result = await sendTempMessage(message, { text: 'halo', reply: true });
+  assert.equal(result, null);
 });

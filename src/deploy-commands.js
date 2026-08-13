@@ -1,61 +1,51 @@
 import 'dotenv/config';
 import { REST, Routes } from 'discord.js';
+import { pathToFileURL } from 'node:url';
+import { commandData } from './commands/index.js';
 
-// Import command data
-import { data as askData } from './commands/ask.js';
-import { data as chatData } from './commands/chat.js';
-import { data as summarizeData } from './commands/summarize.js';
-import { data as helpData } from './commands/help.js';
-import { data as adminData } from './commands/admin.js';
-import { data as pingData } from './commands/ping.js';
-import { data as weatherData } from './commands/weather.js';
-import { data as inviteData } from './commands/invite.js';
-import { data as reactionroleData } from './commands/reactionrole.js';
+/**
+ * Register slash commands with Discord.
+ *
+ * - Global: available in every server the bot is in. Existing servers pick
+ *   these up quickly; brand-new servers can take up to ~1 hour to propagate.
+ * - Guild (GUILD_ID): optional instant override for a single dev guild, which
+ *   is useful during development to see changes immediately.
+ *
+ * Returns metadata about what was deployed so callers can log it.
+ */
+export async function registerCommands() {
+  const token = process.env.DISCORD_TOKEN;
+  const clientId = process.env.DISCORD_CLIENT_ID;
+  const guildId = process.env.GUILD_ID || null;
 
-const commands = [
-  askData,
-  chatData,
-  summarizeData,
-  helpData,
-  adminData,
-  pingData,
-  weatherData,
-  inviteData,
-  reactionroleData,
-].map((cmd) => cmd.toJSON());
-
-const token = process.env.DISCORD_TOKEN;
-const clientId = process.env.DISCORD_CLIENT_ID;
-const guildId = process.env.GUILD_ID;
-
-if (!token || !clientId) {
-  console.error('❌ DISCORD_TOKEN and DISCORD_CLIENT_ID are required in .env');
-  process.exit(1);
-}
-
-const rest = new REST({ version: '10' }).setToken(token);
-
-async function deploy() {
-  try {
-    console.log(`🔄 Deploying ${commands.length} slash commands...`);
-
-    if (guildId) {
-      // Guild-specific (instant, for development)
-      await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
-        body: commands,
-      });
-      console.log(`✅ Commands deployed to guild ${guildId} (instant)`);
-    } else {
-      // Global (takes up to 1 hour to propagate)
-      await rest.put(Routes.applicationCommands(clientId), {
-        body: commands,
-      });
-      console.log('✅ Commands deployed globally (may take up to 1 hour)');
-    }
-  } catch (err) {
-    console.error('❌ Failed to deploy commands:', err);
-    process.exit(1);
+  if (!token || !clientId) {
+    throw new Error('DISCORD_TOKEN and DISCORD_CLIENT_ID are required in .env');
   }
+
+  const rest = new REST({ version: '10' }).setToken(token);
+
+  // Global — this is what makes commands appear in every server.
+  await rest.put(Routes.applicationCommands(clientId), { body: commandData });
+
+  // Optional dev-guild override for instant updates while developing.
+  if (guildId) {
+    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commandData });
+  }
+
+  return { global: true, guildId, count: commandData.length };
 }
 
-deploy();
+// When run directly (`npm run deploy-commands`), deploy and exit.
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) {
+  registerCommands()
+    .then(({ guildId, count }) => {
+      console.log(
+        `✅ Deployed ${count} slash commands globally${guildId ? ` + guild ${guildId} (instant)` : ''}`
+      );
+    })
+    .catch((err) => {
+      console.error('❌ Failed to deploy commands:', err);
+      process.exit(1);
+    });
+}

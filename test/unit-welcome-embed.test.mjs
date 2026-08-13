@@ -20,6 +20,7 @@ test('welcome embed renders member placeholders and image', () => {
     title: 'Welcome {user} to {server}',
     message: 'Say hi to {mention}, {user}!',
     image: 'https://cdn.example/welcome.png',
+    fullWidth: false,
   }).toJSON();
 
   assert.equal(embed.title, 'Welcome New Member to Test Server');
@@ -31,16 +32,28 @@ test('welcome embed renders member placeholders and image', () => {
 test('welcome embed renders @{user} as in-embed mention', () => {
   const embed = buildWelcomeEmbed(memberFixture(), {
     message: 'Selamat datang @{user} di server Testing Cyberjo.',
+    fullWidth: false,
   }).toJSON();
 
   assert.equal(embed.description, 'Selamat datang <@user-1> di server Testing Cyberjo.');
 });
+
+test('welcome embed converts escaped newline characters to actual newlines', () => {
+  const embed = buildWelcomeEmbed(memberFixture(), {
+    message: 'Baris 1\\n\\nBaris 2',
+    fullWidth: false,
+  }).toJSON();
+
+  assert.equal(embed.description, 'Baris 1\n\nBaris 2');
+});
+
 
 test('welcome embed rejects non-http image and caps Discord text limits', () => {
   const embed = buildWelcomeEmbed(memberFixture(), {
     title: 'x'.repeat(300),
     message: 'y'.repeat(5000),
     image: 'javascript:alert(1)',
+    fullWidth: false,
   }).toJSON();
 
   assert.equal(embed.title.length, WELCOME_TITLE_MAX);

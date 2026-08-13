@@ -122,9 +122,33 @@ test('prefix: !welcome configures persistent welcome embed settings', async () =
   await handlePrefixCommand(message);
   assert.match(replyText, /Welcome \{user\}/);
 
+  message.member.guild = guild;
+  message.member.user.displayAvatarURL = () => 'https://cdn.example/avatar.png';
+  message.content = '!welcome message Preview @{user} — read the rules first.';
+  await handlePrefixCommand(message);
+  message.content = '!welcome image https://cdn.example/welcome.png';
+  await handlePrefixCommand(message);
+  message.content = '!welcome preview';
+  const previewCalls = [];
+  message.reply = async (opts) => {
+    previewCalls.push(opts);
+    replyText = typeof opts === 'string' ? opts : opts.content;
+    return {};
+  };
+  await handlePrefixCommand(message);
+  assert.equal(previewCalls.length, 1);
+  assert.ok(previewCalls[0].embeds?.[0], 'preview sends welcome embed');
+  assert.equal(previewCalls[0].embeds[0].data.title, 'Welcome Owner');
+  assert.equal(previewCalls[0].embeds[0].data.description, 'Preview <@qa-owner-id> — read the rules first.');
+  assert.equal(previewCalls[0].embeds[0].data.image.url, 'https://cdn.example/welcome.png');
+
   const outsider = makeMember({ id: 'not-owner' });
   message.author.id = 'not-owner';
   message.member = outsider;
+  message.content = '!welcome preview';
+  await handlePrefixCommand(message);
+  assert.match(replyText, /Owner only/);
+
   message.content = '!welcome off';
   await handlePrefixCommand(message);
   assert.match(replyText, /Owner only/);

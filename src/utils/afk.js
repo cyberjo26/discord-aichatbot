@@ -200,6 +200,28 @@ export function buildAfkNotice(userId) {
   );
 }
 
+const AFK_MESSAGE_TTL_MS = 3000;
+
+/**
+ * Send an AFK notice and auto-delete it after `ttlMs` (default 3s).
+ * @param {object} message - Discord message that triggered the notice
+ * @param {object} opts
+ * @param {string} opts.text - message content to send
+ * @param {boolean} [opts.reply] - reply to the triggering message instead of channel.send
+ * @param {number} [opts.ttlMs] - deletion delay in ms (default 3000)
+ * @returns {Promise<object|null>} the sent message, or null on failure
+ */
+export async function sendTempMessage(message, { text, reply = false, ttlMs = AFK_MESSAGE_TTL_MS } = {}) {
+  const send = reply && typeof message.reply === 'function'
+    ? message.reply(text)
+    : (typeof message.channel?.send === 'function' ? message.channel.send(text) : Promise.resolve(null));
+  const sent = await send.catch(() => null);
+  if (sent && typeof sent.delete === 'function') {
+    setTimeout(() => sent.delete().catch(() => {}), ttlMs);
+  }
+  return sent;
+}
+
 /**
  * Process an incoming guild message for the AFK system:
  * 1. Auto-clear the author's AFK status (they are back) unless it's an !afk command.
@@ -224,10 +246,10 @@ export async function handleAfkMessageEvent(message) {
       setAfk(authorId, reason, message.guild.id);
       logger.info(`${message.author.tag} AFK via natural language ("${reason}")`);
       const wasAlready = previous ? ` (alasan diganti dari "${previous.reason}")` : '';
-      await message.channel
-        .send(`😴 <@${authorId}> sekarang **AFK**: ${reason}${wasAlready}\n` +
-              'Kalau ada yang mention/reply kamu, mereka akan diberitahu. Ketik pesan apa saja untuk kembali.')
-        .catch(() => {});
+      await sendTempMessage(message, {
+        text: `😴 <@${authorId}> sekarang **AFK**: ${reason}${wasAlready}\n` +
+              'Kalau ada yang mention/reply kamu, mereka akan diberitahu. Ketik pesan apa saja untuk kembali.',
+      });
       return; // message consumed — don't auto-clear or notify
     }
   }
@@ -237,9 +259,9 @@ export async function handleAfkMessageEvent(message) {
     const cleared = clearAfk(authorId);
     if (cleared) {
       logger.info(`👋 ${message.author.tag} kembali dari AFK ("${cleared.reason}")`);
-      await message.channel
-        .send(`👋 <@${authorId}> sudah kembali! Status AFK ("${cleared.reason}") dihapus.`)
-        .catch(() => {});
+      await sendTempMessage(message, {
+        text: `👋 <@${authorId}> sudah kembali! Status AFK ("${cleared.reason}") dihapus.`,
+      });
     }
   }
 
@@ -249,7 +271,7 @@ export async function handleAfkMessageEvent(message) {
   for (const user of mentioned) {
     const notice = buildAfkNotice(user.id);
     if (notice) {
-      await message.reply(notice).catch(() => {});
+      await sendTempMessage(message, { text: notice, reply: true });
       return; // one notice per message is enough
     }
   }
@@ -263,7 +285,7 @@ export async function handleAfkMessageEvent(message) {
       if (ref && !ref.author.bot && ref.author.id !== authorId) {
         const notice = buildAfkNotice(ref.author.id);
         if (notice) {
-          await message.reply(notice).catch(() => {});
+          await sendTempMessage(message, { text: notice, reply: true });
         }
       }
     } catch (err) {
@@ -282,5 +304,6 @@ export default {
   buildAfkNotice,
   detectAfkIntent,
   handleAfkMessageEvent,
+  sendTempMessage,
   forceSaveAfk,
 };

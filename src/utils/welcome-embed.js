@@ -13,7 +13,9 @@ function renderTemplate(template, member) {
     '@{user}': `<@${member.id}>`,
   };
 
-  return String(template).replaceAll(/@\{user\}|\{server\}|\{user\}|\{mention\}/g, (placeholder) => values[placeholder]);
+  return String(template)
+    .replaceAll(/@\{user\}|\{server\}|\{user\}|\{mention\}/g, (placeholder) => values[placeholder])
+    .replaceAll('\\n', '\n');
 }
 
 export function isHttpUrl(value) {
@@ -25,12 +27,20 @@ export function isHttpUrl(value) {
   }
 }
 
-export function buildWelcomeEmbed(member, { title, message, image } = {}) {
+// Invisible wide spacer (Braille Blank Space U+2800) forces Discord embed container to max width (520px)
+const WIDE_SPACER = '⠀'.repeat(45);
+
+export function buildWelcomeEmbed(member, { title, message, image, fullWidth = false } = {}) {
+  let description = renderTemplate(message || DEFAULT_MESSAGE, member).slice(0, WELCOME_MESSAGE_MAX);
+
+  if (fullWidth && !description.includes('⠀') && !description.includes('━') && !description.includes('─')) {
+    description += `\n${WIDE_SPACER}`;
+  }
+
   const embed = new EmbedBuilder()
     .setColor(0x57f287)
-    // Discord renders image separately; compact text keeps card balanced on mobile.
     .setTitle(renderTemplate(title || DEFAULT_TITLE, member).slice(0, WELCOME_TITLE_MAX))
-    .setDescription(renderTemplate(message || DEFAULT_MESSAGE, member).slice(0, WELCOME_MESSAGE_MAX))
+    .setDescription(description)
     .setThumbnail(member.user.displayAvatarURL({ size: 256 }))
     .setFooter({ text: member.guild.name.slice(0, 2048) })
     .setTimestamp();
@@ -39,4 +49,4 @@ export function buildWelcomeEmbed(member, { title, message, image } = {}) {
   return embed;
 }
 
-export { DEFAULT_TITLE, DEFAULT_MESSAGE, WELCOME_TITLE_MAX, WELCOME_MESSAGE_MAX };
+export { DEFAULT_TITLE, DEFAULT_MESSAGE, WELCOME_TITLE_MAX, WELCOME_MESSAGE_MAX, WIDE_SPACER };

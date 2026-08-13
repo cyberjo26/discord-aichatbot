@@ -25,8 +25,8 @@ import { isOwner } from './utils/permissions.js';
 import { parseDuration, formatDuration } from './utils/reminders.js';
 import { addWarning, applyWarningEscalation } from './utils/warnings.js';
 import { getSetting, setSetting, removeSetting } from './utils/server-settings.js';
-import { isHttpUrl, WELCOME_TITLE_MAX, WELCOME_MESSAGE_MAX } from './utils/welcome-embed.js';
-import { isAfk, setAfk, clearAfk, getAfk, formatAfkSince } from './utils/afk.js';
+import { buildWelcomeEmbed, isHttpUrl, WELCOME_TITLE_MAX, WELCOME_MESSAGE_MAX } from './utils/welcome-embed.js';
+import { isAfk, setAfk, clearAfk, getAfk, formatAfkSince, sendTempMessage } from './utils/afk.js';
 import config from './config.js';
 import logger from './utils/logger.js';
 import { execPing, execWeather, execInvite } from './actions/index.js';
@@ -297,7 +297,7 @@ async function handleHelp(message) {
       { name: '!afk [alasan]', value: 'Set status AFK (cth: `!afk tidur`). `!afk off` untuk hapus' },
       { name: '🧠 AFK natural', value: 'Bot auto-detect kalimat AFK, cth: `gw afk dulu mau makan` / `im going afk for dinner`' },
       { name: '!help', value: 'Panduan ini' },
-      { name: '!welcome status|on|off|reset', value: 'Atur welcome embed (Owner). Channel: `!welcome channel #welcome` atau `!welcome channel 123456789012345678`. Message mention: `@{user}`. Subcommand: `title`, `message`, `image`' },
+      { name: '!welcome status|preview|on|off|reset', value: 'Atur atau preview welcome embed (Owner). Preview memakai konfigurasi tersimpan dan member yang menjalankan command. Channel: `!welcome channel #welcome` atau `!welcome channel 123456789012345678`. Message mention: `@{user}`. Subcommand: `title`, `message`, `image`' },
       { name: '!voice on|off|status', value: 'Aktifkan/nonaktifkan auto voice reply saat ngobrol dengan `@bot` (Admin/Owner)' },
       { name: '!cvoice [nama/ID channel]', value: 'Cek member di voice channel & statusnya (Mute, Deafen, Live)' },
       { name: '🔒 Moderasi (Admin/Mod Only)', value: 
@@ -309,7 +309,7 @@ async function handleHelp(message) {
         '`!prune <jumlah>` — Hapus pesan di channel (1-100)\n' +
         '`!cn <@user/nama> <nickname baru>` — Ganti nickname user'
       },
-      { name: '🔒 Admin Commands (Owner Only)', value: '`!admin-voice` `!admin-say` `!admin-status`\n`!admin-execute` `!admin-model` `!admin-clear`\n`!admin-voicewelcome on|off|toggle` — Toggle sapaan suara di voice channel\n`!welcome status|on|off|reset` — Atur welcome embed; alias: `!admin-welcome`\n`!act <channel id> <pesan>` — Kirim pesan sebagai bot ke channel mana pun (tag: `@username` / `@userID` / `<@userID>` jadi mention asli)' },
+      { name: '🔒 Admin Commands (Owner Only)', value: '`!admin-voice` `!admin-say` `!admin-status`\n`!admin-execute` `!admin-model` `!admin-clear`\n`!admin-voicewelcome on|off|toggle` — Toggle sapaan suara di voice channel\n`!welcome status|preview|on|off|reset` — Atur/preview welcome embed; alias: `!admin-welcome`\n`!act <channel id> <pesan>` — Kirim pesan sebagai bot ke channel mana pun (tag: `@username` / `@userID` / `<@userID>` jadi mention asli)' },
     )
     .setFooter({ text: `${config.botName} • Prefix Commands` });
 
@@ -358,7 +358,7 @@ async function handleHelp(message) {
 
 // ─── !welcome / !admin-welcome ─────────────────────────────────────
 // Owner-only welcome embed configuration.
-// Usage: !welcome status|on|off|reset
+// Usage: !welcome status|preview|on|off|reset
 //        !welcome channel #channel
 //        !welcome title <text>
 //        !welcome message <text>
@@ -374,6 +374,20 @@ async function handleWelcomeConfig(message, args) {
   const value = spaceIdx === -1 ? '' : input.slice(spaceIdx + 1).trim();
   const guildId = message.guild.id;
 
+  if (sub === 'preview') {
+    if (!message.member?.guild || typeof message.member.user?.displayAvatarURL !== 'function') {
+      return message.reply('❌ Member preview tidak tersedia. Coba lagi di server.');
+    }
+
+    const embed = buildWelcomeEmbed(message.member, {
+      title: getSetting(guildId, 'welcomeTitle'),
+      message: getSetting(guildId, 'welcomeMessage'),
+      image: getSetting(guildId, 'welcomeImage') || config.welcomeFallbackImage,
+    });
+
+    return message.reply({ embeds: [embed] });
+  }
+
   if (!sub || sub === 'status') {
     const channelId = getSetting(guildId, 'welcomeChannelId');
     const enabled = getSetting(guildId, 'welcomeEnabled') !== false;
@@ -384,7 +398,7 @@ async function handleWelcomeConfig(message, args) {
       `**Title:** ${getSetting(guildId, 'welcomeTitle') || '(default)'}`,
       `**Message:** ${getSetting(guildId, 'welcomeMessage') || '(default)'}`,
       `**Image:** ${image}`,
-      'Usage: `!welcome on|off|reset`, `!welcome channel #channel|CHANNEL_ID`, `!welcome title <text>`, `!welcome message <text>`, `!welcome image <url>`',
+      'Usage: `!welcome status|preview|on|off|reset`, `!welcome channel #channel|CHANNEL_ID`, `!welcome title <text>`, `!welcome message <text>`, `!welcome image <url>`',
     ].join('\\n').slice(0, 1900));
   }
 
@@ -452,7 +466,7 @@ async function handleWelcomeConfig(message, args) {
     return message.reply(`✅ Welcome ${sub} diperbarui.`);
   }
 
-  return message.reply('❗ Usage: `!welcome status|on|off|reset`, `channel #channel|CHANNEL_ID`, `title <text>`, `message <text>`, `image <url>`');
+  return message.reply('❗ Usage: `!welcome status|preview|on|off|reset`, `channel #channel|CHANNEL_ID`, `title <text>`, `message <text>`, `image <url>`');
 }
 
 // ─── !voice ────────────────────────────────────────────────────────
@@ -1207,29 +1221,31 @@ async function handleAfk(message, args) {
     const cleared = clearAfk(userId);
     if (cleared) {
       logger.command(message.author.tag, '!afk off');
-      return message.reply(`👋 Selamat kembali, <@${userId}>! Status AFK kamu ("${cleared.reason}") sudah dihapus.`);
+      return sendTempMessage(message, { reply: true, text: `👋 Selamat kembali, <@${userId}>! Status AFK kamu ("${cleared.reason}") sudah dihapus.` });
     }
-    return message.reply('❌ Kamu tidak sedang AFK.');
+    return sendTempMessage(message, { reply: true, text: '❌ Kamu tidak sedang AFK.' });
   }
 
   // Already AFK → tell them (they can use !afk off, or the status clears
   // automatically when they send a normal message / type).
   if (isAfk(userId)) {
     const current = getAfk(userId);
-    return message.reply(
-      `😴 Kamu sudah AFK: **${current.reason}** (${formatAfkSince(current.setAt)}).\n` +
-      'Ketik `!afk off` untuk hapus, atau kirim pesan biasa — otomatis kembali.'
-    );
+    return sendTempMessage(message, {
+      reply: true,
+      text: `😴 Kamu sudah AFK: **${current.reason}** (${formatAfkSince(current.setAt)}).\n` +
+        'Ketik `!afk off` untuk hapus, atau kirim pesan biasa — otomatis kembali.',
+    });
   }
 
   const reason = (args || '').trim() || 'Sedang AFK';
   setAfk(userId, reason, message.guild?.id || null);
   logger.command(message.author.tag, '!afk', reason);
-  return message.reply(
-    `😴 <@${userId}> sekarang **AFK**: ${reason}\n` +
-    'Kalau ada yang mention/reply kamu, mereka akan diberitahu.\n' +
-    'Status otomatis hilang saat kamu kirim pesan atau mengetik.'
-  );
+  return sendTempMessage(message, {
+    reply: true,
+    text: `😴 <@${userId}> sekarang **AFK**: ${reason}\n` +
+      'Kalau ada yang mention/reply kamu, mereka akan diberitahu.\n' +
+      'Status otomatis hilang saat kamu kirim pesan atau mengetik.',
+  });
 }
 
 // ─── !rrole ────────────────────────────────────────────────────────
