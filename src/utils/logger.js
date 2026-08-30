@@ -29,8 +29,37 @@ if (!fs.existsSync(logDir)) {
 }
 const logFile = path.join(logDir, 'bot.log');
 
+// Rotation: when bot.log exceeds MAX_LOG_BYTES, rename it to bot-<date>.log
+// (overwriting any same-day rollover) and start fresh. Keeps a long-running
+// bot's log bounded instead of growing forever.
+// 5 MB × 3 files = ~20 MB worst case — sized for small (2 GB) VPS disks.
+const MAX_LOG_BYTES = 5 * 1024 * 1024; // 5 MB per file
+const MAX_LOG_FILES = 3; // keep at most 3 rotated files
+
+function rotateIfNeeded() {
+  try {
+    const stats = fs.statSync(logFile);
+    if (stats.size < MAX_LOG_BYTES) return;
+
+    const rotated = path.join(logDir, `bot-${getDateString()}.log`);
+    fs.renameSync(logFile, rotated);
+
+    // Prune oldest rotated files beyond MAX_LOG_FILES
+    const rotatedFiles = fs.readdirSync(logDir)
+      .filter((f) => /^bot-\d{4}-\d{2}-\d{2}\.log$/.test(f))
+      .sort();
+    while (rotatedFiles.length > MAX_LOG_FILES) {
+      fs.unlinkSync(path.join(logDir, rotatedFiles.shift()));
+    }
+  } catch {
+    // File may not exist yet or rename failed (e.g. locked on Windows) —
+    // rotation is best-effort; logging continues into the current file.
+  }
+}
+
 function writeToFile(level, ...args) {
   try {
+    rotateIfNeeded();
     const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ');
     // eslint-disable-next-line no-control-regex -- intentional ANSI escape stripping
     const plainText = message.replace(/\x1b\[[0-9;]*m/g, '');

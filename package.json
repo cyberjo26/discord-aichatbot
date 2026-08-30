@@ -1,17 +1,40 @@
 {
-  "name": "pc-monitor-optimizer",
+  "name": "discord-ai-bot",
   "version": "1.0.0",
-  "description": "Lightweight PC monitoring, folder analysis, RAM optimization and performance diagnostics engine.",
+  "description": "Bot Discord AI dengan RAG & Voice — Asisten digital yang pintar, responsif, dan bisa bicara.",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test \"test/*.test.mjs\"",
+    "start:midnight": "node scripts/midnight-restart.js",
+    "dev": "node --watch src/index.js",
+    "deploy-commands": "node src/deploy-commands.js",
+    "deploy-commands:clean": "node src/deploy-commands.js --clean-guilds",
+    "test": "npm run test:unit && npm run test:voice && npm run test:security && npm run test:midnight",
+    "test:unit": "node --experimental-test-module-mocks --test \"test/*.test.mjs\"",
+    "test:voice": "node src/test-voice-features.js",
+    "test:security": "node src/test-security.js",
+    "test:midnight": "node scripts/midnight-restart.test.js",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix"
   },
   "dependencies": {
-    "better-sqlite3": "~12.4.6"
+    "@discordjs/opus": "^0.10.0",
+    "@discordjs/voice": "^0.19.2",
+    "@snazzah/davey": "^0.1.12",
+    "@tavily/core": "^0.7.7",
+    "axios": "^1.19.0",
+    "better-sqlite3": "~12.4.6",
+    "cheerio": "^1.0.0",
+    "discord.js": "^14.27.0",
+    "dotenv": "^17.4.2",
+    "duck-duck-scrape": "^2.2.0",
+    "ffmpeg-static": "^5.2.0",
+    "form-data": "^4.0.6",
+    "libsodium-wrappers": "^0.8.4",
+    "node-edge-tts": "^1.0.0",
+    "tar": "^7.5.22",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
@@ -20,5 +43,8 @@
   },
   "engines": {
     "node": ">=22.12.0"
+  },
+  "overrides": {
+    "tar": "^7.5.22"
   }
 }

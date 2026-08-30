@@ -40,7 +40,9 @@ export function recordMetric(type, data) {
  */
 export function getMetrics() {
   const p95Array = [...metrics.latency.p95].sort((a, b) => a - b);
-  const p95 = p95Array[Math.floor(p95Array.length * 0.95)] || 0;
+  // Nearest-rank p95: ceil(0.95 * n) - 1 (index 94 for the full 100-entry window)
+  const p95Index = p95Array.length ? Math.ceil(0.95 * p95Array.length) - 1 : -1;
+  const p95 = p95Index >= 0 ? p95Array[p95Index] : 0;
   
   return {
     uptime: process.uptime(),
