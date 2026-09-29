@@ -34,7 +34,7 @@
     "libsodium-wrappers": "^0.8.4",
     "node-edge-tts": "^1.0.0",
     "tar": "^7.5.22",
-    "ws": "^8.21.3"
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
